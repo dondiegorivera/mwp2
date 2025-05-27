@@ -1,0 +1,36 @@
+# .gitignore
+
+# Poetry / Python
+.venv/
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+*.env
+.env.*
+env/
+venv/
+data/raw/stock_data.csv
+/data/*
+# IDE / OS specific
+.idea/
+.vscode/
+*.DS_Store
+*.ipynb_checkpoints
+data/
+# Data - you might want to commit small example data, but not large raw/processed files
+# if they are too big for the repo. Consider Git LFS for larger files if needed.
+# For now, let's assume we might commit some data, but you can add lines like:
+# data/raw/*.csv
+# data/processed/*.parquet
+
+# Experiments
+experiments/*
+# If using MLflow, add its local logging directory if not within experiments/
+# mlruns/
+
+# Cache files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
