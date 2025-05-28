@@ -1,0 +1,61 @@
+data:
+  lookback_days: 120
+  max_prediction_horizon: 20
+  min_prediction_horizon: 1
+  batch_size: 64
+  num_workers: 4
+  group_ids:
+  - ticker_id
+  time_idx: time_idx
+  target:
+  - target_1d
+  - target_5d
+  - target_20d
+  target_quantiles:
+  - 0.05
+  - 0.5
+  - 0.95
+  static_categoricals:
+  - ticker_id
+  - sector_id
+  static_reals: []
+  time_varying_known_categoricals: []
+  time_varying_known_reals:
+  - day_of_week
+  - day_of_month
+  - month
+  - is_quarter_end
+  - time_idx
+  time_varying_unknown_categoricals: []
+  time_varying_unknown_reals:
+  - log_return_1d
+  - log_return_5d
+  - log_return_20d
+  - volume_zscore_20d
+  - volatility_20d
+  - rsi_14d
+  - macd
+  - is_missing
+  scalers:
+    default_reals_normalizer: StandardScaler
+    target_normalizer: GroupNormalizer
+model:
+  _target_: market_prediction_workbench.model.GlobalTFT
+  hidden_size: 64
+  lstm_layers: 2
+  dropout: 0.1
+  attention_head_size: 4
+  learning_rate: 0.001
+  weight_decay: 1.0e-05
+trainer:
+  accelerator: auto
+  devices: auto
+  max_epochs: 50
+project_name: market_prediction_workbench
+experiment_id: B_default
+seed: 42
+paths:
+  data_dir: data
+  raw_data_file: ${paths.data_dir}/raw/stock_data.csv
+  processed_data_file: ${paths.data_dir}/processed/processed_data.parquet
+  log_dir: experiments

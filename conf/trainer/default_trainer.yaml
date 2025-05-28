@@ -1,0 +1,21 @@
+# conf/trainer/default_trainer.yaml
+accelerator: "auto" # "cpu", "gpu", "tpu", "ipu", "auto"
+devices: "auto"     # Number of devices, or "auto"
+max_epochs: 50
+# precision: "16-mixed" # For mixed-precision training if using GPU and want speed/memory benefits
+# gradient_clip_val: 0.1 # Optional, common for TFT
+# accumulate_grad_batches: 1
+# log_every_n_steps: 10
+
+# Early stopping (optional but recommended)
+# early_stopping:
+#   monitor: "val_loss"
+#   patience: 5
+#   mode: "min"
+
+# Checkpointing (optional but recommended)
+# model_checkpoint:
+#   monitor: "val_loss"
+#   save_top_k: 1
+#   mode: "min"
+#   filename: "best_model-{epoch:02d}-{val_loss:.2f}"
