@@ -559,6 +559,7 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
         logger=logger,
         gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.1),
+        num_sanity_val_steps=0,  # ← skip the initial sanity‐check validation
     )
 
     print("Trainer initialized. Starting training...")
