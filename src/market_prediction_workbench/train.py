@@ -3,6 +3,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf, ListConfig
 import pytorch_lightning as pl
 import polars as pl_df  # Renamed to avoid conflict with pytorch_lightning.pl
+import pandas as pd
 from pathlib import Path
 import numpy as np
 import torch  # Added for torch.utils.data.WeightedRandomSampler and DataLoader
@@ -27,49 +28,61 @@ from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 # Import scikit-learn's StandardScaler if we intend to use it
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
 
+# Set matmul precision for Tensor Cores if applicable
+# This was the fix for the previous RuntimeError regarding device mismatch during matmul/attention
+if torch.cuda.is_available():
+    # Check if the GPU supports Tensor Cores (Compute Capability 7.0+)
+    # This is a heuristic; specific precision ('high' or 'medium') might depend on the exact GPU and desired trade-off.
+    # For RTX 4090 (Ada Lovelace), CC is 8.9, so this will apply.
+    try:
+        if torch.cuda.get_device_capability()[0] >= 7:
+            torch.set_float32_matmul_precision("medium")  # or 'high'
+            print("PyTorch float32 matmul precision set to 'medium' for Tensor Cores.")
+        else:
+            print(
+                "Current GPU does not have Tensor Cores (or CC < 7.0). Default matmul precision used."
+            )
+    except Exception as e:
+        print(
+            f"Could not set matmul precision (may be normal if no CUDA GPU or older PyTorch): {e}"
+        )
+else:
+    print("CUDA not available. Running on CPU. Matmul precision setting skipped.")
+
 
 # MODIFIED function to be more robust
 def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
     embedding_sizes = {}
 
-    # Check if categorical_encoders attribute exists and is a dictionary (not None)
-    if not hasattr(timeseries_dataset, "categorical_encoders") or not isinstance(
-        timeseries_dataset.categorical_encoders, dict
-    ):
+    # Access the internal attribute _categorical_encoders, which is populated by TimeSeriesDataSet
+    dataset_encoders = timeseries_dataset._categorical_encoders
+
+    # Check if _categorical_encoders attribute exists and is a non-empty dictionary
+    if not isinstance(dataset_encoders, dict) or not dataset_encoders:
         if (
             timeseries_dataset.categoricals
         ):  # Check if there are any categoricals defined in the dataset
             print(
-                "Warning (get_embedding_sizes_for_tft): TimeSeriesDataSet.categorical_encoders is missing, not a dict, or empty, "
+                "Warning (get_embedding_sizes_for_tft): TimeSeriesDataSet._categorical_encoders is missing, not a dict, or empty, "
                 "but dataset has categorical columns. TFT might use defaults or error."
             )
         return {}  # Return empty if no encoders or not a dict
 
     print(
-        f"DEBUG (get_embedding_sizes_for_tft): Processing encoders from TimeSeriesDataSet: {timeseries_dataset.categorical_encoders}"
+        f"DEBUG (get_embedding_sizes_for_tft): Processing encoders from TimeSeriesDataSet._categorical_encoders: {dataset_encoders}"
     )
-
-    # If timeseries_dataset.categorical_encoders is an empty dict, but timeseries_dataset.categoricals is not,
-    # it means TSD did not populate the encoders, which is an issue upstream.
-    if not timeseries_dataset.categorical_encoders and timeseries_dataset.categoricals:
-        print(
-            "CRITICAL (get_embedding_sizes_for_tft): TimeSeriesDataSet.categorical_encoders is an empty dictionary, "
-            "but timeseries_dataset.categoricals is not. This implies encoders were not created/fitted by TimeSeriesDataSet. "
-            "TFT will likely fail."
-        )
-        return {}
 
     for col_name in (
         timeseries_dataset.categoricals
     ):  # Iterate over actual categoricals defined in dataset
-        if col_name in timeseries_dataset.categorical_encoders:
-            encoder = timeseries_dataset.categorical_encoders[col_name]
+        if col_name in dataset_encoders:
+            encoder = dataset_encoders[col_name]
             print(
                 f"DEBUG (get_embedding_sizes_for_tft): Encoder for '{col_name}': {encoder}, type: {type(encoder)}"
             )
 
             cardinality_val = None
-            # Try .cardinality property first
+            # Try .cardinality property first (NaNLabelEncoder has this)
             if hasattr(encoder, "cardinality"):
                 try:
                     cardinality_val = encoder.cardinality
@@ -78,7 +91,6 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
                             f"DEBUG (get_embedding_sizes_for_tft): Accessed encoder.cardinality for '{col_name}': {cardinality_val}"
                         )
                     else:
-                        # This means encoder might not be fitted if cardinality property returned None
                         print(
                             f"DEBUG (get_embedding_sizes_for_tft): encoder.cardinality for '{col_name}' returned None."
                         )
@@ -86,36 +98,37 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
                     print(
                         f"DEBUG (get_embedding_sizes_for_tft): AttributeError on encoder.cardinality for '{col_name}'. Will try .classes_."
                     )
-                    cardinality_val = None  # Ensure fallback
+                    cardinality_val = None
 
-            # Fallback to .classes_ if .cardinality didn't work or returned None
-            if cardinality_val is None:
+            if cardinality_val is None:  # Fallback or if .cardinality was None
                 if hasattr(encoder, "classes_") and encoder.classes_ is not None:
                     num_classes = len(encoder.classes_)
                     add_nan_flag = False
                     # Check for add_nan attribute (specific to NaNLabelEncoder but good general check)
-                    if hasattr(encoder, "add_nan"):
+                    # NaNLabelEncoder is the main one that uses add_nan and contributes to cardinality this way
+                    if hasattr(encoder, "add_nan") and isinstance(
+                        encoder, NaNLabelEncoder
+                    ):
                         add_nan_flag = encoder.add_nan
 
                     cardinality_val = num_classes + (1 if add_nan_flag else 0)
+
                     print(
-                        f"DEBUG (get_embedding_sizes_for_tft): Calculated cardinality from len(encoder.classes_) for '{col_name}': {cardinality_val}"
+                        f"DEBUG (get_embedding_sizes_for_tft): Calculated cardinality from len(encoder.classes_) for '{col_name}': {cardinality_val} (add_nan={add_nan_flag})"
                     )
                 else:
                     print(
-                        f"ERROR (get_embedding_sizes_for_tft): Could not determine cardinality for '{col_name}' from .classes_ either. Skipping."
+                        f"ERROR (get_embedding_sizes_for_tft): Could not determine cardinality for '{col_name}'. Skipping."
                     )
                     continue
 
-            # If, after all attempts, cardinality_val is still None (shouldn't happen if logic above is complete)
-            if cardinality_val is None:
+            if cardinality_val is None:  # Should not happen if logic above is complete
                 print(
                     f"ERROR (get_embedding_sizes_for_tft): Cardinality for '{col_name}' is unexpectedly None. Skipping."
                 )
                 continue
 
             # For TFT, cardinality must be at least 1.
-            # If len(classes_)=0 and add_nan=True, card will be 1. If add_nan=False, card will be 0.
             tft_cardinality = max(1, cardinality_val)
 
             # Calculate embedding dimension
@@ -133,7 +146,7 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
         else:
             print(
                 f"Warning (get_embedding_sizes_for_tft): Categorical column '{col_name}' (from dataset.categoricals) "
-                f"not found in TimeSeriesDataSet.categorical_encoders. This is unexpected if encoders were meant to be created for all."
+                f"not found in TimeSeriesDataSet._categorical_encoders. This is unexpected if encoders were meant to be created for all."
             )
 
     if not embedding_sizes and timeseries_dataset.categoricals:
@@ -224,9 +237,14 @@ def main(cfg: DictConfig) -> None:
 
     for cat_col_name_str in all_categorical_cols_from_config:
         if cat_col_name_str in data_pd.columns:
+            # Check if not already object, string, or pandas dedicated string type
             if (
                 data_pd[cat_col_name_str].dtype != object
-                and data_pd[cat_col_name_str].dtype != str
+                and data_pd[cat_col_name_str].dtype
+                != str  # Python's built-in str type for columns
+                and not pd.api.types.is_string_dtype(
+                    data_pd[cat_col_name_str]
+                )  # Pandas' extension string dtype
             ):
                 print(
                     f"Casting categorical column '{cat_col_name_str}' to string. Original dtype: {data_pd[cat_col_name_str].dtype}"
@@ -245,7 +263,7 @@ def main(cfg: DictConfig) -> None:
         valid_normalizer_names = [
             "GroupNormalizer",
             "EncoderNormalizer",
-            "StandardScaler",
+            "StandardScaler",  # This refers to our SklearnStandardScaler wrapper
         ]
         if default_normalizer_name not in valid_normalizer_names:
             print(
@@ -258,15 +276,15 @@ def main(cfg: DictConfig) -> None:
             + time_varying_known_reals_list
             + static_reals_list
         )
-        reals_to_scale = list(dict.fromkeys(reals_to_scale))
+        reals_to_scale = list(dict.fromkeys(reals_to_scale))  # Unique columns
 
         for col_name_str_loop_var in reals_to_scale:
             current_col_name = str(col_name_str_loop_var)
             if current_col_name in data_pd.columns:
                 if default_normalizer_name == "GroupNormalizer":
                     scalers[current_col_name] = GroupNormalizer(
-                        groups=group_ids_list,
-                        transformation=None,
+                        groups=group_ids_list,  # Ensure group_ids_list is correctly populated
+                        transformation=None,  # Or specify transformation if needed
                     )
                 elif default_normalizer_name == "EncoderNormalizer":
                     scalers[current_col_name] = EncoderNormalizer()
@@ -274,28 +292,37 @@ def main(cfg: DictConfig) -> None:
                     scalers[current_col_name] = SklearnStandardScaler()
     else:
         print(
-            "No 'default_reals_normalizer' specified. PTF will use its defaults for feature scaling."
+            "No 'default_reals_normalizer' specified in cfg.data.scalers. PTF will use its defaults for feature scaling."
         )
 
-    single_target_normalizer_prototype_name = "GroupNormalizer"
-    if cfg.data.get("target_normalizer"):
-        single_target_normalizer_prototype_name = cfg.data.target_normalizer
+    single_target_normalizer_prototype_name = "GroupNormalizer"  # Default
+    if (
+        OmegaConf.select(cfg, "data.scalers.target_normalizer") is not None
+    ):  # Check existence properly
+        single_target_normalizer_prototype_name = cfg.data.scalers.target_normalizer
 
     valid_target_normalizer_names = [
         "GroupNormalizer",
         "EncoderNormalizer",
-        "StandardScaler",
+        "StandardScaler",  # This refers to scikit-learn's StandardScaler
+        "NaNLabelEncoder",  # If target can be categorical
+        None,  # To explicitly use no normalizer (PTF will use TorchNormalizer(method="identity"))
     ]
-    if single_target_normalizer_prototype_name not in valid_target_normalizer_names:
+    if (
+        single_target_normalizer_prototype_name not in valid_target_normalizer_names
+        and single_target_normalizer_prototype_name is not None
+    ):
         print(
             f"Warning: Unknown target_normalizer '{single_target_normalizer_prototype_name}'. Using GroupNormalizer as default."
         )
         single_target_normalizer_prototype_name = "GroupNormalizer"
 
     final_target_normalizer = None
-    if len(target_list) > 1:
+    if single_target_normalizer_prototype_name is None:
+        final_target_normalizer = None  # PTF default
+    elif len(target_list) > 1:
         list_of_normalizers_for_multi = []
-        for _ in target_list:
+        for _ in target_list:  # Create a distinct normalizer instance for each target
             if single_target_normalizer_prototype_name == "GroupNormalizer":
                 list_of_normalizers_for_multi.append(
                     GroupNormalizer(groups=group_ids_list, transformation=None)
@@ -304,11 +331,13 @@ def main(cfg: DictConfig) -> None:
                 list_of_normalizers_for_multi.append(EncoderNormalizer())
             elif single_target_normalizer_prototype_name == "StandardScaler":
                 list_of_normalizers_for_multi.append(SklearnStandardScaler())
+            elif single_target_normalizer_prototype_name == "NaNLabelEncoder":
+                list_of_normalizers_for_multi.append(NaNLabelEncoder())
         if list_of_normalizers_for_multi:
             final_target_normalizer = MultiNormalizer(
                 normalizers=list_of_normalizers_for_multi
             )
-    elif target_list:
+    elif target_list:  # Single target
         if single_target_normalizer_prototype_name == "GroupNormalizer":
             final_target_normalizer = GroupNormalizer(
                 groups=group_ids_list, transformation=None
@@ -317,8 +346,14 @@ def main(cfg: DictConfig) -> None:
             final_target_normalizer = EncoderNormalizer()
         elif single_target_normalizer_prototype_name == "StandardScaler":
             final_target_normalizer = SklearnStandardScaler()
+        elif single_target_normalizer_prototype_name == "NaNLabelEncoder":
+            final_target_normalizer = NaNLabelEncoder()
 
-    if not final_target_normalizer and target_list:
+    if (
+        not final_target_normalizer
+        and target_list
+        and single_target_normalizer_prototype_name is not None
+    ):
         print(
             f"Warning: Target normalizer could not be constructed for {single_target_normalizer_prototype_name} and targets {target_list}. Check logic."
         )
@@ -363,7 +398,7 @@ def main(cfg: DictConfig) -> None:
         time_varying_unknown_reals=time_varying_unknown_reals_list,
         target_normalizer=final_target_normalizer,
         scalers=scalers if scalers else {},
-        categorical_encoders=None,  # <<<<<<<< MODIFICATION: Leave as None so PTF auto-creates encoders
+        categorical_encoders=None,
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
@@ -376,11 +411,8 @@ def main(cfg: DictConfig) -> None:
     print(
         f"  DEBUG: TimeSeriesDataSet.categoricals (property): {timeseries_dataset.categoricals}"
     )
-
-    # Force encoder creation/fitting by calling get_embedding_sizes()
-    _ = timeseries_dataset.get_embedding_sizes()
     print(
-        f"  DEBUG: TimeSeriesDataSet.categorical_encoders (property) after get_embedding_sizes(): {timeseries_dataset.categorical_encoders}"
+        f"  DEBUG: TimeSeriesDataSet._categorical_encoders (before calling get_embedding_sizes_for_tft): {timeseries_dataset._categorical_encoders}"
     )
 
     calculated_embedding_sizes = get_embedding_sizes_for_tft(timeseries_dataset)
@@ -415,33 +447,32 @@ def main(cfg: DictConfig) -> None:
     train_loader_created_with_sampler = False
 
     if ticker_id_col_for_sampler and ticker_id_col_for_sampler in data_pd:
-        internal_df_for_sampler = timeseries_dataset.data["data"]
-
-        if ticker_id_col_for_sampler in internal_df_for_sampler.columns:
-            value_counts_internal = internal_df_for_sampler[
+        decoded_idx_df = timeseries_dataset.decoded_index
+        if ticker_id_col_for_sampler in decoded_idx_df.columns:
+            value_counts_sampler = decoded_idx_df[
                 ticker_id_col_for_sampler
             ].value_counts()
 
-            if not value_counts_internal.empty:
-                weights_internal_map = value_counts_internal.rdiv(1.0)
-                weights_for_rows = (
-                    internal_df_for_sampler[ticker_id_col_for_sampler]
-                    .map(weights_internal_map)
+            if not value_counts_sampler.empty:
+                weights_map_sampler = 1.0 / value_counts_sampler
+                weights_for_rows_sampler = (
+                    decoded_idx_df[ticker_id_col_for_sampler]
+                    .map(weights_map_sampler)
                     .fillna(1.0)
                 )
 
-                if (weights_for_rows.values <= 0).any():
+                if (weights_for_rows_sampler.values <= 0).any():
                     print(
                         "Warning: Some calculated weights for sampler are non-positive. Clamping to a small positive value."
                     )
-                    weights_for_rows.values[weights_for_rows.values <= 0] = 1e-6
+                    weights_for_rows_sampler.values[
+                        weights_for_rows_sampler.values <= 0
+                    ] = 1e-6
 
-                if len(weights_for_rows.values) == len(timeseries_dataset):
-                    num_samples_for_sampler = len(weights_for_rows)
-
+                if len(weights_for_rows_sampler) == len(timeseries_dataset):
                     sampler = torch.utils.data.WeightedRandomSampler(
-                        weights=weights_for_rows.values,
-                        num_samples=num_samples_for_sampler,
+                        weights=weights_for_rows_sampler.values,
+                        num_samples=len(weights_for_rows_sampler),
                         replacement=True,
                     )
                     train_loader = timeseries_dataset.to_dataloader(
@@ -449,20 +480,24 @@ def main(cfg: DictConfig) -> None:
                         batch_size=cfg.trainer.batch_size,
                         sampler=sampler,
                         num_workers=cfg.trainer.num_workers,
+                        shuffle=False,
                     )
                     train_loader_created_with_sampler = True
+                    print(
+                        f"Train Dataloader created with WeightedRandomSampler for '{ticker_id_col_for_sampler}'."
+                    )
                 else:
                     print(
-                        f"Warning: Length of weights ({len(weights_for_rows.values)}) does not match dataset length ({len(timeseries_dataset)}). "
+                        f"Warning: Length of weights ({len(weights_for_rows_sampler)}) does not match dataset length ({len(timeseries_dataset)}). "
                         "Sampler not used."
                     )
             else:
                 print(
-                    f"Warning: Value counts for '{ticker_id_col_for_sampler}' in internal_df_for_sampler is empty. Sampler not used."
+                    f"Warning: Value counts for '{ticker_id_col_for_sampler}' in decoded_index_df is empty. Sampler not used."
                 )
         else:
             print(
-                f"Critical: Ticker ID column '{ticker_id_col_for_sampler}' not in TimeSeriesDataSet's internal DataFrame. Sampler not used."
+                f"Critical: Ticker ID column '{ticker_id_col_for_sampler}' not in TimeSeriesDataSet's decoded_index. Sampler not used."
             )
 
     if not train_loader_created_with_sampler:
@@ -498,10 +533,16 @@ def main(cfg: DictConfig) -> None:
     if cfg.trainer.get("use_wandb", False):
         from pytorch_lightning.loggers import WandbLogger
 
+        project_name_wandb = str(cfg.get("project_name", "default_project"))
+        exp_id_wandb = str(cfg.get("experiment_id", "default_exp"))
+        run_name_wandb = f"{project_name_wandb}_{exp_id_wandb}"
+
         logger = WandbLogger(
+            name=run_name_wandb,
             project=cfg.trainer.wandb_project_name,
             entity=cfg.trainer.wandb_entity,
             config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False),
+            save_dir=str(Path(cfg.paths.log_dir) / "wandb"),
         )
         print("WandB Logger initialized.")
     else:
@@ -517,7 +558,7 @@ def main(cfg: DictConfig) -> None:
         ),
         callbacks=callbacks,
         logger=logger,
-        gradient_clip_val=0.1,
+        gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.1),
     )
 
     print("Trainer initialized. Starting training...")

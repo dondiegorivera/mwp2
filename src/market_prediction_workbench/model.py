@@ -10,7 +10,7 @@ class GlobalTFT(pl.LightningModule):
     def __init__(
         self,
         timeseries_dataset: TimeSeriesDataSet,
-        model_specific_params: dict,  # This will contain 'loss', possibly 'embedding_sizes', etc.
+        model_specific_params: dict,  # This will contain 'loss', 'embedding_sizes', etc.
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
     ):
@@ -19,16 +19,23 @@ class GlobalTFT(pl.LightningModule):
         # Make a copy to avoid modifying the original dict if it's reused elsewhere
         init_model_params_copy = model_specific_params.copy()
 
-        # Compute embedding sizes only after the dataset’s encoders exist
-        # This ensures keys like "ticker_id" are present
-        embedding_sizes = timeseries_dataset.get_embedding_sizes()
-        if embedding_sizes:
-            init_model_params_copy["embedding_sizes"] = embedding_sizes
-        else:
-            # If for some reason the dict contained an outdated or empty embedding_sizes, remove it
-            init_model_params_copy.pop("embedding_sizes", None)
+        # REMOVE THE FOLLOWING BLOCK:
+        # The `model_specific_params` (and thus `init_model_params_copy`) already contains
+        # `embedding_sizes` calculated by `get_embedding_sizes_for_tft` in `train.py`.
+        # `TemporalFusionTransformer.from_dataset` will use these if present, or compute them
+        # internally if absent. This block is redundant and calls a non-existent method.
+        #
+        # # Compute embedding sizes only after the dataset’s encoders exist
+        # # This ensures keys like "ticker_id" are present
+        # embedding_sizes = timeseries_dataset.get_embedding_sizes() # THIS METHOD DOES NOT EXIST
+        # if embedding_sizes:
+        #     init_model_params_copy["embedding_sizes"] = embedding_sizes
+        # else:
+        #     # If for some reason the dict contained an outdated or empty embedding_sizes, remove it
+        #     init_model_params_copy.pop("embedding_sizes", None)
 
         # Prepare hyperparameters to save (exclude the large dataset and any nn.Modules)
+        # init_model_params_copy already contains the 'embedding_sizes' key from train.py
         hparams_for_global_tft = {
             "learning_rate": learning_rate,
             "weight_decay": weight_decay,
@@ -42,11 +49,13 @@ class GlobalTFT(pl.LightningModule):
         self.save_hyperparameters(hparams_for_global_tft, ignore=["timeseries_dataset"])
 
         # Instantiate the TemporalFusionTransformer using the corrected params dict
+        # init_model_params_copy already contains 'embedding_sizes' (from train.py)
+        # and 'loss' (instantiated in train.py).
         self.model = TemporalFusionTransformer.from_dataset(
             timeseries_dataset,
             learning_rate=learning_rate,  # TFT’s internal optimizer LR
             weight_decay=weight_decay,  # TFT’s internal optimizer weight decay
-            **init_model_params_copy,  # Contains 'loss' (nn.Module) and now correct 'embedding_sizes'
+            **init_model_params_copy,
         )
 
     def forward(self, x_batch):

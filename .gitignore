@@ -27,6 +27,7 @@ data/
 experiments/*
 # If using MLflow, add its local logging directory if not within experiments/
 # mlruns/
+**/hparams.yaml
 
 # Cache files
 .pytest_cache/
