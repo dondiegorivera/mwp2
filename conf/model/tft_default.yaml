@@ -1,20 +1,16 @@
 # conf/model/tft_default.yaml
-_target_: pytorch_forecasting.models.temporal_fusion_transformer.TemporalFusionTransformer # Will be used by GlobalTFT's from_dataset
+_target_: market_prediction_workbench.model.GlobalTFT # Changed this line
 
-# These are parameters for TemporalFusionTransformer.from_dataset()
-# Passed via model_specific_params in train.py to GlobalTFT
-hidden_size: 64        # follows plan’s grid
+# Parameters for GlobalTFT constructor
+learning_rate: 1e-3 # Added
+weight_decay: 1e-5  # Added
+
+# Hyperparameters for the underlying TemporalFusionTransformer
+# These will be filtered into model_specific_params in train.py
+hidden_size: 64
 lstm_layers: 2
 dropout: 0.10
-# embedding_sizes will be calculated in train.py and passed in
-
-# QuantileLoss configuration
 loss:
   _target_: pytorch_forecasting.metrics.QuantileLoss
   quantiles: [0.05, 0.5, 0.95]
-
-# Other TFT params can be added here as needed, e.g.:
-# attention_head_size: 4
-# hidden_continuous_size: 32
-# output_size: 7 # for quantiles [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-# target_idx: 0 # If single target, otherwise handled by target list in TimeSeriesDataSet
+# embedding_sizes will be calculated in train.py and added to model_specific_params

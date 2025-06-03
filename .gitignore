@@ -12,13 +12,12 @@ build/
 env/
 venv/
 data/raw/stock_data.csv
-/data/*
+/data/raw/*
 # IDE / OS specific
 .idea/
 .vscode/
 *.DS_Store
 *.ipynb_checkpoints
-data/
 # Data - you might want to commit small example data, but not large raw/processed files
 # if they are too big for the repo. Consider Git LFS for larger files if needed.
 # For now, let's assume we might commit some data, but you can add lines like:

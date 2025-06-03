@@ -36,4 +36,4 @@ yfinance = "^0.2.61"
 tiktoken = "^0.9.0"
 
 [tool.ruff]
-ignore = ["E731", "F401", "F821", "F841"]
+lint.ignore = ["E731", "F401", "F821", "F841"]
