@@ -1,23 +1,20 @@
 # conf/model/tft_default.yaml
+_target_: pytorch_forecasting.models.temporal_fusion_transformer.TemporalFusionTransformer # Will be used by GlobalTFT's from_dataset
 
-_target_: "market_prediction_workbench.model.GlobalTFT" # Path to our model class
-
-# These are model_specific_params that GlobalTFT's __init__ expects
-# Parameters for TemporalFusionTransformer.from_dataset()
-hidden_size: 64
+# These are parameters for TemporalFusionTransformer.from_dataset()
+# Passed via model_specific_params in train.py to GlobalTFT
+hidden_size: 64        # follows plan’s grid
 lstm_layers: 2
-dropout: 0.1
-attention_head_size: 4
-# output_size: will be inferred from target_quantiles in data config or by TimeSeriesDataSet
-# loss: will be inferred (QuantileLoss) by TFT if quantiles are set in TimeSeriesDataSet / data_config
+dropout: 0.10
+# embedding_sizes will be calculated in train.py and passed in
 
-# These are passed to GlobalTFT's __init__ directly
-learning_rate: 0.001
-weight_decay: 0.00001
+# QuantileLoss configuration
+loss:
+  _target_: pytorch_forecasting.metrics.QuantileLoss
+  quantiles: [0.05, 0.5, 0.95]
 
-# embedding_dims: Can be specified here if we want to override TimeSeriesDataSet auto-inference
-# Will be calculated in train.py and merged into this config before model instantiation
-# Example structure:
-# embedding_dims:
-#   ticker_id: 32 # this would be calculated (num_tickers**0.25, etc.)
-#   sector_id: 10
+# Other TFT params can be added here as needed, e.g.:
+# attention_head_size: 4
+# hidden_continuous_size: 32
+# output_size: 7 # for quantiles [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+# target_idx: 0 # If single target, otherwise handled by target list in TimeSeriesDataSet

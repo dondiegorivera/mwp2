@@ -204,7 +204,7 @@ def main():
         help="Path to a markdown file containing a header message to include in the dump.",
     )
     parser.add_argument(
-        "--extensions", default=".py,.md,.txt", help="File extensions to process"
+        "--extensions", default=".py,.md,.txt,.yaml", help="File extensions to process"
     )
     args = parser.parse_args()
 
