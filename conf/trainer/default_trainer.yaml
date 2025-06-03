@@ -1,5 +1,5 @@
 # conf/trainer/default_trainer.yaml
-epochs: 100 # Default number of epochs
+epochs: 10 # Default number of epochs
 batch_size: 64 # Default batch size for training
 num_workers: 4 # Default num_workers for DataLoaders, adjust based on system
 # patience_for_early_stopping: 5
@@ -20,6 +20,6 @@ early_stopping_mode: "min"
 lr_monitor_logging_interval: "epoch"
 
 # WandB Logger (optional)
-use_wandb: false # Set to true to enable
-wandb_project_name: "market-tft"
-wandb_entity: null # Your WandB entity/username if using a team or specific entity
+use_wandb: true # <--- CHANGE THIS TO true
+wandb_project_name: "market-tft" # You can change this if you like
+wandb_entity: "rolandpolczer-roland-polczer" # <--- REPLACE THIS with your W&B username or team name

@@ -2,7 +2,7 @@
 
 # TimeSeriesDataSet parameters
 lookback_days: 120
-max_prediction_horizon: 20 # Max forecast horizon for target definition (e.g., for target_20d)
+max_prediction_horizon: 1 # Max forecast horizon for target definition (e.g., for target_20d)
 min_prediction_horizon: 1 # For pytorch-forecasting, prediction length is max_pred_horizon
 # prediction_length: ${.max_prediction_horizon} # For TimeSeriesDataSet, if using single horizon
 # For multi-horizon targets, target setup is more complex.

@@ -6,12 +6,11 @@ from torch.optim import AdamW
 from pytorch_forecasting.models.temporal_fusion_transformer._tft import (
     TemporalFusionTransformer,
 )
-from pytorch_forecasting.metrics import MultiLoss  # Import MultiLoss
+from pytorch_forecasting.metrics import QuantileLoss, MultiLoss
 import numpy as np
 
 
 class TemporalFusionTransformerWithDevice(TemporalFusionTransformer):
-    # ... (no changes) ...
     def get_attention_mask(self, *args, **kwargs) -> torch.Tensor:
         if len(args) == 3 and all(isinstance(x, (int, torch.Tensor)) for x in args):
             raw_bs, raw_enc, raw_dec = args
@@ -81,6 +80,19 @@ class GlobalTFT(pl.LightningModule):
             },
         }
         self.save_hyperparameters(hparams_for_global_tft, ignore=["timeseries_dataset"])
+
+        # FIX: Properly handle multiple targets and quantiles
+        num_targets = len(timeseries_dataset.target_names)
+        quantiles = (
+            model_specific_params["loss"].quantiles
+            if "loss" in model_specific_params
+            else [0.5]
+        )
+        output_size = num_targets * len(quantiles)
+
+        # Ensure output size is set correctly
+        model_specific_params["output_size"] = output_size
+        self.save_hyperparameters(ignore=["timeseries_dataset"])
 
         self.model = TemporalFusionTransformerWithDevice.from_dataset(
             timeseries_dataset,
@@ -198,37 +210,11 @@ class GlobalTFT(pl.LightningModule):
                 ) from e
 
     def _prepare_target_tensor(self, raw_target_data):
-        # print(f"DEBUG _prepare_target_tensor: received raw_target_data type {type(raw_target_data)}")
         target = self._process_input_data(raw_target_data)
 
-        if not torch.is_tensor(target):
-            raise TypeError(
-                f"Target after _process_input_data is not a tensor, but {type(target)}"
-            )
-
-        # print(f"DEBUG _prepare_target_tensor: processed target.shape={target.shape}, target.ndim={target.ndim}")
-
-        if target.ndim == 3:
-            pass
-        elif target.ndim == 2:
-            target = target.unsqueeze(-1)
-        else:
-            if target.ndim == 1 and target.nelement() == 0:
-                print(
-                    f"Warning: _prepare_target_tensor received a 1D empty tensor: shape {target.shape}"
-                )
-            raise ValueError(
-                f"Target tensor after _process_input_data has unexpected ndim: {target.ndim} (shape: {target.shape}). "
-                "Expected 2D (batch, seq_len for N_targets=1) or 3D (batch, seq_len, N_targets). "
-                f"Original raw_target_data type: {type(raw_target_data)}, value snippet: {str(raw_target_data)[:100]}"
-            )
-
-        if target.ndim != 3:
-            raise AssertionError(
-                f"Target tensor failed to become 3D. Shape: {target.shape}"
-            )
-
-        # print(f"DEBUG _prepare_target_tensor: returning target.shape={target.shape}, target.ndim={target.ndim}")
+        # FIX: Ensure proper dimensions for multi-target
+        if target.ndim == 2:
+            target = target.unsqueeze(1)  # Add time dimension
         return target
 
     def _prepare_scale_tensor(self, raw_scale_data, target_shape):
@@ -246,27 +232,25 @@ class GlobalTFT(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         out = self(x)
+
+        # FIX: Properly handle multi-target format
         target = self._prepare_target_tensor(y[0])
-        loss_val = None
-        if len(y) > 1 and y[1] is not None:
-            scale = self._prepare_scale_tensor(y[1], target.shape)
-            loss_val = self.model.loss(out.prediction, target, weight=scale)
-        else:
-            loss_val = self.model.loss(out.prediction, target)
-        self.log("train_loss", loss_val, on_step=True, on_epoch=True, prog_bar=True)
+        target = target.unsqueeze(-1)  # Add channel dimension
+
+        loss_val = self.model.loss(out.prediction, target)
+        self.log("train_loss", loss_val)
         return loss_val
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         out = self(x)
+
+        # FIX: Same as training step
         target = self._prepare_target_tensor(y[0])
-        loss_val = None
-        if len(y) > 1 and y[1] is not None:
-            scale = self._prepare_scale_tensor(y[1], target.shape)
-            loss_val = self.model.loss(out.prediction, target, weight=scale)
-        else:
-            loss_val = self.model.loss(out.prediction, target)
-        self.log("val_loss", loss_val, on_epoch=True, prog_bar=True)
+        target = target.unsqueeze(-1)  # Add channel dimension
+
+        loss_val = self.model.loss(out.prediction, target)
+        self.log("val_loss", loss_val)
         return loss_val
 
     def configure_optimizers(self):
