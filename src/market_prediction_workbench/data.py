@@ -3,6 +3,7 @@
 import polars as pl
 from pathlib import Path
 
+
 # Add these imports at the top of src/market_prediction_workbench/data.py
 import torch
 from torch.utils.data import Dataset
@@ -329,11 +330,6 @@ def reindex_and_fill_gaps(df: pl.DataFrame, max_ffill_days: int = 5) -> pl.DataF
     return df_filled
 
 
-# src/market_prediction_workbench/data.py
-
-# src/market_prediction_workbench/data.py
-
-
 def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     """
     Creates all model features and targets.
@@ -345,7 +341,8 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
 
     df = df.sort("ticker_id", "date")
 
-    log_close = pl.col("close").log()
+    safe_close = pl.when(pl.col("close") <= 1e-6).then(1e-6).otherwise(pl.col("close"))
+    log_close = safe_close.log()
 
     # --- Target Definition ---
     df = df.with_columns(
@@ -357,98 +354,166 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # --- Feature Engineering ---
     # 1. Known-future (calendar) features
     df = df.with_columns(
-        day_of_week=pl.col("date").dt.weekday(),
-        day_of_month=pl.col("date").dt.day(),
-        month=pl.col("date").dt.month(),
+        day_of_week=pl.col("date").dt.weekday().cast(pl.Float32),
+        day_of_month=pl.col("date").dt.day().cast(pl.Float32),
+        month=pl.col("date").dt.month().cast(pl.Float32),
         is_quarter_end=(pl.col("date").dt.month().is_in([3, 6, 9, 12]))
         & (pl.col("date").dt.month_end() == pl.col("date")),
-    )
+    ).with_columns(pl.col("is_quarter_end").cast(pl.Float32))
+
+    if "is_missing" in df.columns:
+        df = df.with_columns(pl.col("is_missing").cast(pl.Float32))
+    else:
+        print("Warning: 'is_missing' column not found before feature engineering.")
+        df = df.with_columns(pl.lit(0.0).cast(pl.Float32).alias("is_missing"))
 
     # 2. Observed-past features
     log_return_1d_base_expr = log_close - log_close.shift(1)
+
+    rolling_volume_mean = (
+        pl.col("volume").rolling_mean(window_size=20, min_samples=10).over("ticker_id")
+    )
+    rolling_volume_std = (
+        pl.col("volume").rolling_std(window_size=20, min_samples=10).over("ticker_id")
+    )
+
+    volume_zscore_expr = (
+        pl.when(rolling_volume_std > 1e-6)
+        .then((pl.col("volume") - rolling_volume_mean) / rolling_volume_std)
+        .otherwise(0.0)
+    )
 
     df = df.with_columns(
         log_return_1d=log_return_1d_base_expr.over("ticker_id"),
         log_return_5d=(log_close - log_close.shift(5)).over("ticker_id"),
         log_return_20d=(log_close - log_close.shift(20)).over("ticker_id"),
-        volume_zscore_20d=(
-            (
-                pl.col("volume")
-                - pl.col("volume").rolling_mean(window_size=20).over("ticker_id")
-            )
-            / (pl.col("volume").rolling_std(window_size=20).over("ticker_id") + 1e-6)
-        ).alias("volume_zscore_20d"),
-        volatility_20d=log_return_1d_base_expr.rolling_std(window_size=20).over(
-            "ticker_id"
-        ),
+        volume_zscore_20d=volume_zscore_expr.alias("volume_zscore_20d"),
+        volatility_20d=log_return_1d_base_expr.rolling_std(
+            window_size=20, min_samples=10
+        ).over("ticker_id"),
         skew_20d=log_return_1d_base_expr.rolling_skew(window_size=20).over("ticker_id"),
         kurtosis_20d=log_return_1d_base_expr.rolling_kurtosis(window_size=20).over(
             "ticker_id"
         ),
-        price_change=pl.col("close").diff(1).over("ticker_id"),
+        price_change=safe_close.diff(1).over("ticker_id"),
     )
 
     # RSI calculation
     df = df.with_columns(
         gain=pl.when(pl.col("price_change") > 0)
         .then(pl.col("price_change"))
-        .otherwise(0)
+        .otherwise(0.0)
         .alias("gain"),
         loss=pl.when(pl.col("price_change") < 0)
         .then(-pl.col("price_change"))
-        .otherwise(0)
+        .otherwise(0.0)
         .alias("loss"),
     )
 
-    df = df.with_columns(
-        avg_gain=pl.col("gain")
-        .ewm_mean(alpha=1 / 14, min_samples=14)
-        .over("ticker_id"),  # Changed min_periods to min_samples
-        avg_loss=pl.col("loss")
-        .ewm_mean(alpha=1 / 14, min_samples=14)
-        .over("ticker_id"),  # Changed min_periods to min_samples
+    avg_gain_expr = (
+        pl.col("gain").ewm_mean(alpha=1 / 14, min_samples=10).over("ticker_id")
+    )
+    avg_loss_expr = (
+        pl.col("loss").ewm_mean(alpha=1 / 14, min_samples=10).over("ticker_id")
     )
 
-    rs = pl.col("avg_gain") / (pl.col("avg_loss") + 1e-6)
-    df = df.with_columns(rsi_14d=(100 - (100 / (1 + rs))).alias("rsi_14d"))
+    df = df.with_columns(
+        avg_gain=avg_gain_expr,
+        avg_loss=avg_loss_expr,
+    )
+
+    rs_expr = (
+        pl.when(pl.col("avg_loss") > 1e-6)
+        .then(pl.col("avg_gain") / pl.col("avg_loss"))
+        .otherwise(pl.when(pl.col("avg_gain") > 1e-6).then(100.0).otherwise(1.0))
+    )
+
+    df = df.with_columns(rsi_14d=(100.0 - (100.0 / (1.0 + rs_expr))).alias("rsi_14d"))
 
     # MACD
-    ema_12_expr = (
-        pl.col("close").ewm_mean(span=12, min_samples=12).over("ticker_id")
-    )  # Changed min_periods to min_samples
-    ema_26_expr = (
-        pl.col("close").ewm_mean(span=26, min_samples=26).over("ticker_id")
-    )  # Changed min_periods to min_samples
+    ema_12_expr = safe_close.ewm_mean(
+        span=12, min_samples=12 - 1 if (12 - 1) > 0 else 1
+    ).over("ticker_id")
+    ema_26_expr = safe_close.ewm_mean(
+        span=26, min_samples=26 - 1 if (26 - 1) > 0 else 1
+    ).over("ticker_id")
 
-    # Step 1: Create the 'macd' column
-    df = df.with_columns(macd=(ema_12_expr - ema_26_expr).alias("macd"))
+    df = df.with_columns(macd_base=(ema_12_expr - ema_26_expr))
 
-    # Step 2: Create the 'macd_signal' column using the now existing 'macd' column
     df = df.with_columns(
-        macd_signal=pl.col("macd")
-        .ewm_mean(span=9, min_samples=9)
-        .over("ticker_id")  # Changed min_periods to min_samples
+        macd_signal_base=(
+            pl.col("macd_base")
+            .ewm_mean(span=9, min_samples=9 - 1 if (9 - 1) > 0 else 1)
+            .over("ticker_id")
+        )
     )
+    df = df.rename({"macd_base": "macd", "macd_signal_base": "macd_signal"})
 
     # --- Final Cleanup ---
-    df = df.drop_nulls().drop(["price_change", "gain", "loss", "avg_gain", "avg_loss"])
+
+    # 1. Drop intermediate columns used for feature creation
+    intermediate_cols = ["price_change", "gain", "loss", "avg_gain", "avg_loss"]
+    cols_to_drop_now = [col for col in intermediate_cols if col in df.columns]
+    if cols_to_drop_now:
+        df = df.drop(cols_to_drop_now)
+
+    # 2. Explicitly convert NaNs and Infinities in float columns to Polars nulls (None)
+    float_cols = [
+        col_name
+        for col_name, dtype in df.schema.items()
+        if dtype == pl.Float32 or dtype == pl.Float64
+    ]
+    for col_name in float_cols:
+        df = df.with_columns(
+            pl.when(
+                pl.col(col_name).is_nan() | pl.col(col_name).is_infinite()
+            )  # Check for NaN or Inf
+            .then(None)  # Convert to proper Polars null
+            .otherwise(pl.col(col_name))
+            .alias(col_name)
+        )
+
+    # --- Debugging NaN counts before drop_nulls() ---
+    # print("\n--- NaN/Null Counts Before drop_nulls() [After explicit NaN/Inf -> None conversion] ---")
+    # problem_cols = ["target_20d", "skew_20d", "kurtosis_20d"]
+    # for col_name in df.columns:
+    #    if col_name in problem_cols or df[col_name].is_null().any():
+    #        null_count = df[col_name].is_null().sum()
+    #        # is_nan() might be 0 now if all NaNs became Polars nulls
+    #        nan_count_specific = df[col_name].is_nan().sum() if df[col_name].dtype in [pl.Float32, pl.Float64] else 0
+    #        dtype_info = df[col_name].dtype
+    #        print(f"Column: {col_name:<20} | Nulls: {null_count:<7} | NaNs (float only): {nan_count_specific:<7} | Dtype: {dtype_info}")
+    # print("-----------------------------------------------------------------------------------\n")
+    # --- End Debugging ---
+
+    # 3. Drop all rows that contain any Polars null values
+    df = df.drop_nulls()
+
+    # 4. Sort the data
     df = df.sort("ticker_id", "date")
 
-    print(f"Feature creation complete. Final shape: {df.shape}")
+    print(
+        f"Feature creation complete. After NaN/inf handling AND drop_nulls(), shape: {df.shape}"
+    )
+    if df.height == 0:
+        raise ValueError(
+            "All data was dropped after feature engineering and NaN/inf handling. Check data quality and feature logic."
+        )
 
+    # 5. Create the final time_idx
     df = df.with_columns(
-        time_idx=(
-            pl.col("date").rank("ordinal").over("ticker_id") - 1
-        )  # rank is fine here
+        time_idx=(pl.col("date").rank("ordinal").over("ticker_id") - 1)
     )
 
     return df
 
 
-# Update the __main__ block again
+# Update the __main__ block again to use the modified create_features_and_targets
 if __name__ == "__main__":
     DATA_DIR = Path("data")
-    RAW_DATA_PATH = DATA_DIR / "raw" / "stock_data.csv"
+    RAW_DATA_PATH = (
+        DATA_DIR / "raw" / "stock_data.csv"
+    )  # Make sure this is your actual raw data file name
     PROCESSED_DATA_DIR = DATA_DIR / "processed"
 
     # Define the final processed file path
@@ -456,13 +521,28 @@ if __name__ == "__main__":
 
     # This is our full pipeline
     print("--- Starting Data Pipeline ---")
-    df = load_and_clean_data(RAW_DATA_PATH)
-    df = create_mappings(df, PROCESSED_DATA_DIR)
-    df = reindex_and_fill_gaps(df)
-    df_final = create_features_and_targets(df)
+    df_initial = load_and_clean_data(RAW_DATA_PATH)
+    df_mapped = create_mappings(df_initial, PROCESSED_DATA_DIR)
+    df_reindexed = reindex_and_fill_gaps(df_mapped)
+    df_final = create_features_and_targets(df_reindexed)  # Use the modified function
 
     print("\n--- Final Processed DataFrame ---")
-    print(df_final.head())
-    print(f"\nSaving final processed data to {PROCESSED_PARQUET_PATH}...")
-    df_final.write_parquet(PROCESSED_PARQUET_PATH)
+    if df_final.height > 0:  # This line should no longer cause an error
+        print(df_final.head())
+        # Add a check for infinities in the final dataframe before saving
+        for col_name in df_final.columns:
+            if df_final[col_name].dtype in [pl.Float32, pl.Float64]:
+                if df_final[col_name].is_infinite().any():
+                    print(
+                        f"Warning: Column '{col_name}' contains infinite values before saving!"
+                    )
+                if df_final[col_name].is_nan().any():
+                    print(
+                        f"Warning: Column '{col_name}' contains NaN values before saving (should have been dropped)!"
+                    )
+
+        print(f"\nSaving final processed data to {PROCESSED_PARQUET_PATH}...")
+        df_final.write_parquet(PROCESSED_PARQUET_PATH)
+    else:
+        print("No data left after processing. Parquet file not saved.")
     print("--- Data Pipeline Complete ---")

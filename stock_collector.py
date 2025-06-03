@@ -15,7 +15,7 @@ import argparse
 from datetime import date, timedelta, datetime
 
 
-def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.csv"):
+def fetch_stock_data(start_date_obj, end_date_obj, ofile="stock_data.csv"):
     """
     Collects asset information for given tickers and date range, then writes to a CSV.
 
@@ -53,13 +53,10 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
 
     all_rows_data = []  # To store data for all tickers before writing to CSV
 
-    print(f"Fetching data for tickers: {', '.join(tickers)}")
-    print(
-        f"Period: {start_date_obj.strftime('%Y-%m-%d')} to {end_date_obj.strftime('%Y-%m-%d')}"
-    )
-
-    for ticker_symbol in tickers:
-        print(f"\nProcessing {ticker_symbol}...")
+    for ticker_symbol in start_date_obj:
+        print(
+            f"\nProcessing {ticker_symbol} from {start_date_obj[ticker_symbol].strftime('%Y-%m-%d')} to {end_date_obj.strftime('%Y-%m-%d')}"
+        )
         try:
             ticker = yf.Ticker(ticker_symbol)
 
@@ -74,9 +71,8 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
                 continue
 
             # Use .get() with a default value to avoid KeyErrors if a field is missing
-            asset_name = info.get(
-                "shortName", ticker_symbol
-            )  # Fallback to ticker if name not found
+            # Fallback to ticker if name not found
+            asset_name = info.get("shortName", ticker_symbol)
             echange = info.get("fullExchangeName", "N/A")
             industry = info.get("industry", "N/A")
             lastDividendDate = info.get("lastDividendDate", "N/A")
@@ -92,12 +88,13 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
             companyOfficers = info.get("companyOfficers", "N/A")
             marketCap = info.get("marketCap", "N/A")
 
+            start_date = start_date_obj[ticker_symbol].strftime("%Y-%m-%d")
+            end_date = yf_query_end_date.strftime("%Y-%m-%d")
+            if start_date > end_date:
+                continue
             # Get historical market data for the specified range
             # interval="1d" is the default for daily data
-            hist_df = ticker.history(
-                start=start_date_obj.strftime("%Y-%m-%d"),
-                end=yf_query_end_date.strftime("%Y-%m-%d"),
-            )
+            hist_df = ticker.history(start=start_date, end=end_date)
 
             if hist_df.empty:
                 print(
@@ -115,9 +112,8 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
                 closing_price = row_data.get("Close", "N/A")
                 high_price = row_data.get("High", "N/A")
                 low_price = row_data.get("Low", "N/A")
-                dividend = row_data.get(
-                    "Dividends", 0.0
-                )  # Dividends can be 0.0, which is valid
+                # Dividends can be 0.0, which is valid
+                dividend = row_data.get("Dividends", 0.0)
                 volume = row_data.get("Volume", "N/A")
 
                 data_row = {
@@ -146,11 +142,12 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
                         if isinstance(low_price, (int, float))
                         else low_price
                     ),
+                    # Dividends can be small
                     "Dividend": (
                         f"{dividend:.4f}"
                         if isinstance(dividend, (int, float))
                         else dividend
-                    ),  # Dividends can be small
+                    ),
                     "Volume": (
                         int(volume)
                         if isinstance(volume, (int, float)) and not pd.isna(volume)
@@ -218,6 +215,55 @@ def fetch_stock_data(tickers, start_date_obj, end_date_obj, ofile="stock_data.cs
         print(f"Error: Could not write to CSV file {ofile}.")
 
 
+def read_asset_list(file_path):
+    try:
+        with open(file_path, "r") as f:
+            tlist2 = [stripped for line in f if (stripped := line.strip())]
+    except FileNotFoundError:
+        print(f"Error: The file '{file_path}' was not found.")
+    except Execption as e:
+        print(f"An Error occured: {e}")
+    return list(set(tlist2))
+
+
+def retreive_start_date(file_path, tlist, start_date, end_date):
+    assets = {}
+    try:
+        df_orig_raw = pd.read_csv(
+            file_path, parse_dates=["Date"], na_values=["N/A"]
+        ).sort_values(by=["Date", "Asset Ticker"])
+        df_raw_pivoted = df_orig_raw.pivot_table(
+            index="Date", columns="Asset Ticker", values=["Closing Price"]
+        )
+
+        if isinstance(df_raw_pivoted.columns, pd.MultiIndex):
+            df_raw_pivoted.columns = [
+                f"{ticker}_{feat.replace(' ', '_')}"
+                for feat, ticker in df_raw_pivoted.columns
+            ]
+        else:
+            df_raw_pivoted.columns = [
+                f"{str(col).replace(' ', '_')}" for col in df_raw_pivoted.columns
+            ]
+
+        for i in tlist:
+            close_col = f"{i}_Closing_Price"
+            if close_col not in df_raw_pivoted.columns:
+                assets[i] = start_date
+            else:
+                current_price_series = df_raw_pivoted[close_col]
+                assets[i] = max(
+                    (current_price_series.index.max() + timedelta(days=1)).date(),
+                    end_date,
+                )
+
+    except Exception as e:
+        for i in tlist:
+            assets[i] = start_date
+
+    return assets
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Collects stock asset information from Yahoo Finance and saves it to a CSV file.",
@@ -234,6 +280,9 @@ def main():
         "--ofile",
         default="stock_data.csv",
         help="Output CSV file name (default: stock_data.csv).",
+    )
+    parser.add_argument(
+        "--asset-list", default="asset_list.txt", help="Asset list file"
     )
 
     try:
@@ -259,21 +308,6 @@ def main():
         # Default end_date to yesterday (as typically the last fully closed trading day's data available)
         end_date_obj = date.today() - timedelta(days=1)
 
-    if args.start_date:
-        try:
-            start_date_obj = datetime.strptime(args.start_date, "%Y-%m-%d").date()
-        except ValueError:
-            print("Error: Invalid start_date format. Please use YYYY-MM-DD.")
-            return
-    else:
-        # If no start_date is provided, default start_date to be the same as end_date.
-        # This means we'll fetch data for that single day (the end_date).
-        start_date_obj = end_date_obj
-
-    # Validate date range
-    if start_date_obj > end_date_obj:
-        print("Error: Start date cannot be after end date.")
-        return
     if end_date_obj >= date.today():
         print(
             "Warning: End date is today or in the future. Data for today might be incomplete or unavailable until market close."
@@ -282,395 +316,23 @@ def main():
             "To get yesterday's data (last full trading day), do not specify dates or set end_date to yesterday."
         )
 
-    tlist = [
-        "BTC-EUR",
-        "ETH-EUR",
-        "EURUSD=X",
-        "EURJPY=X",
-        "CL=F",
-        "GC=F",
-        "SI=F",
-        "EOAN.DE",
-        "EBK.DE",
-        "ENI.DE",
-        "UN0.DE",
-        "WWG.F",
-        "LEC.F",
-        "RIO1.DE",
-        "CRC.F",
-        "IBE.MC",
-        "CLP.F",
-        "ALV.DE",
-        "DB1.DE",
-        "MUV2.DE",
-        "HNR1.DE",
-        "CBK.DE",
-        "TLX.DE",
-        "3V64.DE",
-        "FRE.DE",
-        "FME.DE",
-        "MRK.DE",
-        "AFX.DE",
-        "PFE.F",
-        "UNH.F",
-        "2M6.DE",
-        "SNW.F",
-        "GIS.DE",
-        "BRM.DE",
-        "LLY.F",
-        "VNA.DE",
-        "LHA.DE",
-        "UPAB.F",
-        "FDX.DE",
-        "CY2.F",
-        "CTM.F",
-        "NTT.F",
-        "DIP.F",
-        "IFX.DE",
-        "SRT3.DE",
-        "RAA.DE",
-        "LEG.DE",
-        "INL.F",
-        "IBM.F",
-        "CIS.F",
-        "TII.F",
-        "VOW3.DE",
-        "BMW.DE",
-        "HDM.F",
-        "FMC1.DE",
-        "NISA.F",
-        "SUK.F",
-        "VOW.DE",
-        "ADS.DE",
-        "BEI.DE",
-        "PSM.DE",
-        "BOSS.DE",
-        "PUM.DE",
-        "JNJ.F",
-        "PRG.F",
-        "CCC3.DE",
-        "WDP.F",
-        "PEP.DE",
-        "MMM.F",
-        "LOR.F",
-        "MOH.F",
-        "CPA.F",
-        "HEI.DE",
-        "HOT.DE",
-        "LWE.F",
-        "ILT.F",
-        "KMY.DE",
-        "SQU.F",
-        "DCO.DE",
-        "UTDI.DE",
-        "TUI1.DE",
-        "ALD.F",
-        "TN8.F",
-        "ENL.F",
-        "H4W.F",
-        "WF3.F",
-        "FIE.DE",
-        "TTK.DE",
-        "HBH.DE",
-        "WMT.F",
-        "HDI.DE",
-        "SRB.DE",
-        "CTO.F",
-        "DYH.F",
-        "CAR.F",
-        "BAS.DE",
-        "BAYN.DE",
-        "SY1.DE",
-        "LXS.DE",
-        "FPE3.DE",
-        "WCH.DE",
-        "SDF.DE",
-        "AIL.F",
-        "DLY.F",
-        "LIN",
-        "BHP",
-        "RIO",
-        "SHW",
-        "SCCO",
-        "APD",
-        "FCX",
-        "ECL",
-        "CRH",
-        "NUE",
-        "CTVA",
-        "DOW",
-        "DD",
-        "PPG",
-        "NTR",
-        "NEM",
-        "LYB",
-        "VMC",
-        "MLM",
-        "CMCSA",
-        "DIS",
-        "ATVI",
-        "NTES",
-        "AMX",
-        "EA",
-        "CHT",
-        "TTWO",
-        "HD",
-        "TM",
-        "NKE",
-        "LOW",
-        "SBUX",
-        "TJX",
-        "MELI",
-        "JD",
-        "STLA",
-        "RACE",
-        "F",
-        "HMC",
-        "GM",
-        "WMT",
-        "PG",
-        "KO",
-        "PEP",
-        "COST",
-        "FMX",
-        "UL",
-        "MDLZ",
-        "CL",
-        "TGT",
-        "EL",
-        "MNST",
-        "KDP",
-        "HSY",
-        "ADM",
-        "KHC",
-        "KMB",
-        "GIS",
-        "XOM",
-        "CVX",
-        "SHEL",
-        "TTE",
-        "COP",
-        "BP",
-        "EQNR",
-        "PBR",
-        "PBR-A",
-        "SLB",
-        "EOG",
-        "CNQ",
-        "MPC",
-        "OXY",
-        "PXD",
-        "V",
-        "MA",
-        "PSX",
-        "E",
-        "WDS",
-        "HES",
-        "VLO",
-        "SU",
-        "ET",
-        "UNH",
-        "JNJ",
-        "LLY",
-        "MRK",
-        "NVS",
-        "AZN",
-        "TMO",
-        "PFE",
-        "DHR",
-        "ABT",
-        "SNY",
-        "BMY",
-        "MDT",
-        "ELV",
-        "SYK",
-        "GILD",
-        "CVS",
-        "CI",
-        "ZTS",
-        "UPS",
-        "BA",
-        "HON",
-        "DE",
-        "RTX",
-        "GE",
-        "LMT",
-        "ADP",
-        "ETN",
-        "CNI",
-        "ITW",
-        "NOC",
-        "FDX",
-        "WM",
-        "RELX",
-        "GD",
-        "TRI",
-        "MMM",
-        "EMR",
-        "WY",
-        "AAPL",
-        "MSFT",
-        "NVDA",
-        "ASML",
-        "ADBE",
-        "CSCO",
-        "ACN",
-        "SAP",
-        "TXN",
-        "INTC",
-        "INTU",
-        "QCOM",
-        "IBM",
-        "AMAT",
-        "SONY",
-        "ADI",
-        "CEG",
-        "ELP",
-        "ALI=F",
-        "MGC=F",
-        "SB=F",
-        "SPAX.PVT",
-        "NOK",
-        "GLD",
-        "SPY",
-        "QBTS",
-        "RGTI",
-        "LCID",
-        "IONQ",
-        "TSLA",
-        "MARA",
-        "PLTR",
-        "JWN",
-        "BTG",
-        "CLSK",
-        "SOFI",
-        "ITUB",
-        "NU",
-        "AGNC",
-        "BBD",
-        "HIMS",
-        "AAL",
-        "RIOT",
-        "DFS",
-        "GRAB",
-        "1211.HK",
-        "P911.DE",
-        "DPE5.DE",
-        "EJ7.F",
-        "SAP.DE",
-        "ZAL.DE",
-        "SIE.DE",
-        "8TP0.F",
-        "50V.F",
-        "SHA0.DE",
-        "DTG.DE",
-        "EVD.DE",
-        "OB7.F",
-        "SHL.DE",
-        "HTG.DE",
-        "KO32.F",
-        "TMV.DE",
-        "DHER.DE",
-        "AIXA.DE",
-        "MAV.F",
-        "DEZ.DE",
-        "HAG.DE",
-        "PLTS.DE",
-        "9OC.F",
-        "9OC.SG",
-        "NDX1.DE",
-        "PAH3.DE",
-        "BSP.DE",
-        "ULF1.F",
-        "HEN3.DE",
-        "4JH.F",
-        "TEG.DE",
-        "E3T.F",
-        "S4D.BE",
-        "SGDE.DE",
-        "FPQ1.F",
-        "AG1.DE",
-        "CEC.DE",
-        "MJ4.F",
-        "TLT5.DE",
-        "3FR0.F",
-        "YBB.F",
-        "BT81.F",
-        "EBM.F",
-        "BPE5.DE",
-        "9DO.F",
-        "BR01.F",
-        "BJ4.F",
-        "CHP.SG",
-        "B4X.F",
-        "12J0.F",
-        "HFG.DE",
-        "PNY.F",
-        "SZU.DE",
-        "GLY.F",
-        "HDD.DE",
-        "PW5.BE",
-        "S92.DE",
-        "DBK.SG",
-        "PBB.DE",
-        "CON.DE",
-        "RRU.DE",
-        "QQ3S.DE",
-        "BEI.DE",
-        "BVB.DE",
-        "LEG.DE",
-        "ETHA.DE",
-        "BC8.DE",
-        "SZG.DE",
-        "EJT1.DE",
-        "RHM.DE",
-        "KGX.DE",
-        "NOV.DE",
-        "AIR.DE",
-        "JEN.DE",
-        "MLP.DE",
-        "RQ0.F",
-        "VBTC.DE",
-        "NVD.DE",
-        "DOU.DE",
-        "FTK.DE",
-        "TL0.DE",
-        "IOS.DE",
-        "4GLD.DE",
-        "ZETH.DE",
-        "3CP.F",
-        "KTN.DE",
-        "BTG4.SG",
-        "HEN.DE",
-        "NOA3.DE",
-        "HBC1.DE",
-        "ABEA.DE",
-        "KCO.DE",
-        "SGL.DE",
-        "PFE.DE",
-        "TLX.DE",
-        "DCHB.MU",
-        "PFSE.DE",
-        "VS0L.DE",
-        "E3B.DE",
-        "FNM.SG",
-        "JUN3.DE",
-        "DWNI.DE",
-        "1CO.DE",
-        "NDA.DE",
-        "DWS.DE",
-        "BMT.DE",
-        "NEM.DE",
-        "WAF.DE",
-        "MTX.DE",
-        "RRTL.DE",
-        "GBF.DE",
-        "F3C.DE",
-        "ORC.DE",
-        "MICR",
-    ]
+    tlist = read_asset_list(args.asset_list)
 
-    fetch_stock_data(tlist, start_date_obj, end_date_obj, args.ofile)
+    if args.start_date:
+        try:
+            start_date_obj = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        except ValueError:
+            print("Error: Invalid start_date format. Please use YYYY-MM-DD.")
+            return
+    else:
+        start_date_obj = date.today() - timedelta(days=3000)
+
+    if start_date_obj > end_date_obj:
+        print("Error: Start date is later then end date!")
+        return
+
+    assets = retreive_start_date(args.ofile, tlist, start_date_obj, end_date_obj)
+    fetch_stock_data(assets, end_date_obj, args.ofile)
 
 
 if __name__ == "__main__":

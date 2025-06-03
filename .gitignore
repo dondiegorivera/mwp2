@@ -34,3 +34,13 @@ experiments/*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+.git
+outputs/
+bak/
+
+stock_collector.py
+collect.sh
+asset_list.txt
+
+dumper.py

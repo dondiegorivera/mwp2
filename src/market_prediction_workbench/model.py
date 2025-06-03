@@ -2,43 +2,49 @@
 import pytorch_lightning as pl
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from torch.optim import AdamW
-
-# import torch.nn.functional as F # If doing manual MAE logging etc.
+import torch.nn as nn  # For type hint
 
 
 class GlobalTFT(pl.LightningModule):
     def __init__(
         self,
-        timeseries_dataset: TimeSeriesDataSet,  # Pass the whole dataset
-        model_specific_params: dict,  # Params like hidden_size, lstm_layers, dropout etc.
+        timeseries_dataset: TimeSeriesDataSet,
+        model_specific_params: dict,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
     ):
         super().__init__()
 
-        # Save hyperparameters.
-        # We don't save timeseries_dataset directly as it can be large and complex.
-        # Its relevant parameters are used by from_dataset.
+        # Make a copy of model_specific_params to not modify the dictionary that might be used elsewhere.
+        init_model_specific_params_copy = model_specific_params.copy()
+
+        # Prepare hyperparameters for GlobalTFT to save.
+        # We'll store a version of model_specific_params that excludes nn.Module instances.
+        model_specific_params_for_hparams = {
+            k: v
+            for k, v in init_model_specific_params_copy.items()
+            if not isinstance(v, nn.Module)
+        }
+
+        # Save hyperparameters for the GlobalTFT module.
+        # 'model_specific_params' saved here will be the cleaned version.
         self.save_hyperparameters(
-            "model_specific_params", "learning_rate", "weight_decay"
+            {
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "model_specific_params": model_specific_params_for_hparams,
+            }
         )
+        # Note: self.hparams will now contain these.
+        # self.hparams.model_specific_params will be the cleaned dict.
 
-        # The model_specific_params should contain:
-        # hidden_size, lstm_layers, dropout, attention_head_size, etc.
-        # It will also determine the output_size and loss if not defaults.
-        # For example, if model_specific_params includes "quantiles": [0.05, 0.5, 0.95],
-        # from_dataset will configure QuantileLoss and output_size accordingly.
-
+        # The actual TemporalFusionTransformer instance will receive the original
+        # model_specific_params, which may include nn.Module instances like 'loss'.
+        # TFT's own save_hyperparameters mechanism handles ignoring these internally.
         self.model = TemporalFusionTransformer.from_dataset(
-            timeseries_dataset,  # Use the passed dataset
-            **self.hparams.model_specific_params,  # Unpack model-specific parameters
+            timeseries_dataset,
+            **init_model_specific_params_copy,  # Pass the original params, including any nn.Modules
         )
-
-        # The loss function is typically handled by the model if created from_dataset with quantiles
-        # self.loss_fn = self.model.loss # This would get the loss function from the TFT instance
-
-    # forward, training_step, validation_step, configure_optimizers remain the same for now.
-    # ... (rest of the class as before) ...
 
     def forward(self, x_batch):  # x_batch is the input dict from dataloader
         output = self.model(x_batch)
@@ -47,6 +53,7 @@ class GlobalTFT(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         out = self(x)
+        # self.model.loss refers to the loss function instance held by the TFT model
         loss = self.model.loss(
             out, y[0], y[1] if len(y) > 1 else None
         )  # y[1] is target_scale/weights
@@ -58,33 +65,12 @@ class GlobalTFT(pl.LightningModule):
         out = self(x)
         loss = self.model.loss(out, y[0], y[1] if len(y) > 1 else None)
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-
-        # Example: Log MAE for the median forecast (P50) for the first target variable
-        # This assumes "target_1d" is the first target and we have a median prediction
-        # if 0.5 in self.model.hparams.loss.quantiles:
-        #     median_idx = self.model.hparams.loss.quantiles.index(0.5)
-        #     # y[0] is (batch_size, decoder_length, num_targets)
-        #     # out["prediction"] is (batch_size, decoder_length, num_quantiles_x_num_targets)
-        #     # If multi-target, predictions are concatenated along the last dim.
-        #     # Assuming single target for simplicity here, or adjust indexing
-        #     p50_predictions = out["prediction"][..., median_idx]
-        #     actuals = y[0][..., 0] # Assuming first target
-
-        #     # Handle target scaling if TimeSeriesDataSet used it
-        #     if y[1] is not None and "target_scale" in x: # y[1] might be weights or target_scale
-        #          # This depends on how TimeSeriesDataSet structures y and if target_scale is directly available
-        #          # Often target_scale is part of x (decoder_target_scale or encoder_target_scale)
-        #          # For simplicity, assuming direct comparison or manual unscaling needed elsewhere.
-        #          pass
-
-        #     mae = F.l1_loss(p50_predictions, actuals)
-        #     self.log("val_mae_p50_target0", mae, on_step=False, on_epoch=True)
         return loss
 
     def configure_optimizers(self):
         optimizer = AdamW(
             self.parameters(),
-            lr=self.hparams.learning_rate,
-            weight_decay=self.hparams.weight_decay,
+            lr=self.hparams.learning_rate,  # Correctly accesses saved hyperparameter
+            weight_decay=self.hparams.weight_decay,  # Correctly accesses saved hyperparameter
         )
         return optimizer
