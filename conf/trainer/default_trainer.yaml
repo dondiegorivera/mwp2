@@ -19,6 +19,9 @@ early_stopping_mode: "min"
 # For LearningRateMonitor
 lr_monitor_logging_interval: "epoch"
 
+# gradient clipping to prevent explosions:
+gradient_clip_val: 0.5
+
 # WandB Logger (optional)
 use_wandb: true # <--- CHANGE THIS TO true
 wandb_project_name: "market-tft" # You can change this if you like
