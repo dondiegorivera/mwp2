@@ -256,7 +256,10 @@ class GlobalTFT(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=3, factor=0.5, verbose=True
+            optimizer,
+            patience=3,
+            factor=0.5,
+            # verbose=True  # REMOVED THIS LINE
         )
         return {
             "optimizer": optimizer,

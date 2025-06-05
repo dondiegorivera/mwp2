@@ -23,7 +23,11 @@ from pytorch_forecasting.data.encoders import (
 # from pytorch_forecasting.metrics import QuantileLoss # Instantiated by hydra
 
 # Import Lightning Callbacks
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
+from pytorch_lightning.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 
 # Import scikit-learn's StandardScaler if we intend to use it
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
@@ -527,7 +531,19 @@ def main(cfg: DictConfig) -> None:
     lr_monitor = LearningRateMonitor(
         logging_interval=cfg.trainer.lr_monitor_logging_interval
     )
-    callbacks = [early_stop_callback, lr_monitor]
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=None,  # If None, PTL saves to its default logger path (e.g., lightning_logs/version_X/checkpoints)
+        # You can specify a path like "my_checkpoints/"
+        filename="{epoch}-{val_loss:.2f}-best",  # Example filename
+        monitor="val_loss",  # Metric to monitor
+        mode="min",  # "min" for loss, "max" for accuracy
+        save_top_k=1,  # Save only the best model
+        save_last=True,  # Also save the last model at the end of training
+        verbose=True,
+    )
+
+    callbacks = [early_stop_callback, lr_monitor, checkpoint_callback]
 
     logger = None
     if cfg.trainer.get("use_wandb", False):

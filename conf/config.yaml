@@ -19,4 +19,7 @@ paths:
   # ticker_map_file: "${paths.data_dir}/processed/ticker_map.parquet" # Might be needed for num_tickers
   # sector_map_file: "${paths.data_dir}/processed/sector_map.parquet" # Might be needed for num_sectors
 
-# Add other top-level configurations if needed
+evaluate:
+  batch_size: 256
+  num_workers: 4
+  sample_tickers: ["AAPL", "MSFT", "GOOGL"]  # For visualization
