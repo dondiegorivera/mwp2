@@ -51,44 +51,6 @@ def _safe_parse_val_loss(stem: str) -> float:
         return float("inf")
 
 
-def _recreate_tsd(run_cfg: DictConfig, parquet_path: Path) -> TimeSeriesDataSet:
-    """Rebuild an *approximate* TimeSeriesDataSet from run-time config alone."""
-    df = pl.read_parquet(parquet_path).to_pandas()
-
-    # Time index ➜ enforce int64
-    time_idx_col = str(run_cfg.data.time_idx)
-    df[time_idx_col] = df[time_idx_col].astype(np.int64)
-
-    # Categorical cols ➜ cast to str
-    for col in _cfg_list(run_cfg.data.static_categoricals):
-        if col in df:
-            df[col] = df[col].astype(str)
-
-    target_cols = _cfg_list(run_cfg.data.target)
-    return TimeSeriesDataSet(
-        df,
-        time_idx=time_idx_col,
-        target=target_cols[0] if len(target_cols) == 1 else target_cols,
-        group_ids=_cfg_list(run_cfg.data.group_ids),
-        max_encoder_length=run_cfg.data.lookback_days,
-        max_prediction_length=run_cfg.data.max_prediction_horizon,
-        static_categoricals=_cfg_list(run_cfg.data.static_categoricals),
-        static_reals=_cfg_list(run_cfg.data.static_reals),
-        time_varying_known_categoricals=_cfg_list(
-            run_cfg.data.time_varying_known_categoricals
-        ),
-        time_varying_known_reals=_cfg_list(run_cfg.data.time_varying_known_reals),
-        time_varying_unknown_categoricals=_cfg_list(
-            run_cfg.data.time_varying_unknown_categoricals
-        ),
-        time_varying_unknown_reals=_cfg_list(run_cfg.data.time_varying_unknown_reals),
-        add_relative_time_idx=run_cfg.data.get("add_relative_time_idx", False),
-        add_target_scales=run_cfg.data.get("add_target_scales", False),
-        add_encoder_length=run_cfg.data.get("add_encoder_length", False),
-        allow_missing_timesteps=run_cfg.data.get("allow_missing_timesteps", False),
-    )
-
-
 def _move_to_device(obj, device):
     """Recursively send tensors to the selected device."""
     if torch.is_tensor(obj):
@@ -106,11 +68,15 @@ def _move_to_device(obj, device):
 
 
 def run_inference(
-    model: GlobalTFT, loader: DataLoader, cfg: DictConfig
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    model: GlobalTFT, loader: DataLoader, cfg: DictConfig, dataset: TimeSeriesDataSet
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], List[str]]:
     """Run model on the dataloader and collect 1-step-ahead predictions."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
+
+    # Get the decoder to convert model output back to original IDs
+    group_id_col = _cfg_list(cfg.data.group_ids)[0]
+    decoder = dataset.categorical_encoders[group_id_col]
 
     preds_all, trues_all, tickers_all, t_idx_all = [], [], [], []
 
@@ -118,51 +84,56 @@ def run_inference(
         for x, y in tqdm(loader, desc="Running inference"):
             x = _move_to_device(x, device)
 
-            # Model forward
-            output = model(x).prediction  # (B, H, Q) or list[…]
-            if isinstance(output, list):  # multi-target
+            output = model(x).prediction
+            if isinstance(output, list):
                 output = torch.stack(output, dim=2)
-            else:  # single-target ➜ add target dim
-                output = output.unsqueeze(2)  # (B, H, 1, Q)
+            else:
+                output = output.unsqueeze(2)
 
-            # Targets
             target = y[0]
             if isinstance(target, list):
                 target = torch.stack(target, dim=2)
             else:
-                target = target.unsqueeze(2)  # (B, H, 1)
+                target = target.unsqueeze(2)
+
+            # --- THE FIX: Decode the group IDs ---
+            encoded_ids = x["groups"][:, 0].cpu().numpy()
+            # Decode from new integers (0,1,2) back to original string IDs ('30', '120')
+            string_ids = decoder.inverse_transform(encoded_ids)
+            # Convert back to original integer IDs (30, 120)
+            original_integer_ids = [int(sid) for sid in string_ids]
+            tickers_all.extend(original_integer_ids)
+            # --- END FIX ---
 
             preds_all.append(output.cpu().numpy())
             trues_all.append(target.numpy())
-            tickers_all.append(x["groups"][:, 0].cpu().numpy())
             t_idx_all.append(x["decoder_time_idx"].cpu().numpy())
 
-    preds = np.concatenate(preds_all, 0)  # (N, H, T, Q)
-    trues = np.concatenate(trues_all, 0)  # (N, H, T)
-    tickers = np.concatenate(tickers_all, 0)
+    preds = np.concatenate(preds_all, 0)
+    trues = np.concatenate(trues_all, 0)
+    tickers = np.array(tickers_all)  # Convert list of IDs to numpy array
     time_idx = np.concatenate(t_idx_all, 0)
 
-    # Use *first* decoder time step (horizon-1) for metrics / plots
-    preds_h1 = preds[:, 0]  # (N, T, Q)
-    trues_h1 = trues[:, 0]  # (N, T)
+    preds_h1 = preds[:, 0]
+    trues_h1 = trues[:, 0]
     dec_time = time_idx[:, 0]
 
     pred_dict, true_dict = {}, {"ticker": tickers, "time_idx": dec_time}
-    tgt_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
+    short_tgt_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
 
-    for i, name in enumerate(tgt_names):
+    for i, name in enumerate(short_tgt_names):
         pred_dict[f"{name}_lower"] = preds_h1[:, i, 0]
         pred_dict[f"{name}"] = preds_h1[:, i, 1]
         pred_dict[f"{name}_upper"] = preds_h1[:, i, 2]
         true_dict[name] = trues_h1[:, i]
 
-    return pred_dict, true_dict
+    return pred_dict, true_dict, short_tgt_names
 
 
-def evaluate(preds: Dict, trues: Dict, tgt_names: List[str]) -> Dict[str, float]:
+def evaluate(preds: Dict, trues: Dict, short_tgt_names: List[str]) -> Dict[str, float]:
     """MAE, PI-coverage, direction-accuracy for every horizon."""
     out: Dict[str, float] = {}
-    for name in tgt_names:
+    for name in short_tgt_names:
         p, t = preds[name], trues[name]
         lo, hi = preds[f"{name}_lower"], preds[f"{name}_upper"]
 
@@ -184,17 +155,14 @@ def _safe_ticker_id(df: pl.DataFrame, ticker: str) -> int | None:
         return None
 
 
-def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, tgt_names):
+def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_names):
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create a directory to save CSVs for specific tickers
     ticker_csv_dir = out_dir / "ticker_predictions_for_plot"
     ticker_csv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create a single DataFrame for easier filtering and plotting
     df_plot = pd.DataFrame(trues)
     for key, val in preds.items():
-        # Add a 'p_' prefix to prediction columns to avoid name clashes
         df_plot[f"p_{key}"] = val
 
     for tk in sample_tickers:
@@ -203,23 +171,19 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, tgt_names):
             print(f"'{tk}' not found in ticker_map – skipping.")
             continue
 
-        # Filter the DataFrame for the current ticker and sort by time
         df_ticker = df_plot[df_plot["ticker"] == tid].sort_values("time_idx")
 
-        # --- ADDED: Save this specific ticker's data for manual inspection ---
         ticker_csv_path = ticker_csv_dir / f"{tk}_predictions.csv"
         df_ticker.to_csv(ticker_csv_path, index=False)
         print(f"Saved prediction data for '{tk}' to {ticker_csv_path}")
-        # --- END ADDED ---
 
         if len(df_ticker) < 2:
             print(f"Ticker '{tk}' has <2 predictions – skipping plot.")
             continue
 
-        plt.figure(figsize=(15, 4 * len(tgt_names)))
-        for i, name in enumerate(tgt_names):
-            plt.subplot(len(tgt_names), 1, i + 1)
-            # actual & median
+        plt.figure(figsize=(15, 4 * len(short_tgt_names)))
+        for i, name in enumerate(short_tgt_names):
+            plt.subplot(len(short_tgt_names), 1, i + 1)
             plt.plot(df_ticker["time_idx"], df_ticker[name], "b-", label="Actual")
             plt.plot(
                 df_ticker["time_idx"],
@@ -227,7 +191,6 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, tgt_names):
                 "r--",
                 label="Pred (median)",
             )
-            # prediction interval
             plt.fill_between(
                 df_ticker["time_idx"],
                 df_ticker[f"p_{name}_lower"],
@@ -244,6 +207,7 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, tgt_names):
         plt.tight_layout()
         plt.savefig(out_dir / f"{tk}_timeseries.png")
         plt.close()
+        print(f"Successfully generated plot for {tk}.")
 
 
 def save_output(metrics: Dict, preds: Dict, trues: Dict, out_dir: Path):
@@ -264,9 +228,6 @@ def save_output(metrics: Dict, preds: Dict, trues: Dict, out_dir: Path):
 def main(cfg: DictConfig):
     log_dir = Path(cfg.paths.log_dir)
 
-    # ------------------------------------------------------------------#
-    # 1. Locate latest run + checkpoint                                 #
-    # ------------------------------------------------------------------#
     ckpts = list(log_dir.glob("**/*.ckpt"))
     if not ckpts:
         sys.exit(f"No .ckpt files found under {log_dir}")
@@ -283,84 +244,102 @@ def main(cfg: DictConfig):
         latest_run.glob("*.ckpt")
     )
     cand_ckpts.sort(key=lambda p: _safe_parse_val_loss(p.stem))
-
     best = next((p for p in cand_ckpts if "best" in p.stem), None) or cand_ckpts[0]
     print(f"\nEvaluating checkpoint: {best}")
 
-    # ------------------------------------------------------------------#
-    # 2. Load run config & rebuild dataset                              #
-    # ------------------------------------------------------------------#
-    cfg_yaml = next(latest_run.glob("**/.hydra/config.yaml"), None)
-    if cfg_yaml is None:
-        sys.exit("Could not locate run .hydra/config.yaml")
-    run_cfg = OmegaConf.load(cfg_yaml)
-
     parquet_path = Path(cfg.paths.processed_data_file)
+    if not parquet_path.exists():
+        sys.exit(f"Processed data file not found at {parquet_path}")
+
+    print("Loading full processed dataset to match model architecture...")
+    df_full = pd.read_parquet(parquet_path)
 
     cp = torch.load(best, map_location="cpu", weights_only=False)
     ds_params = cp["hyper_parameters"]["timeseries_dataset_params"]
 
-    df = pl.read_parquet(parquet_path).to_pandas()
-    df[ds_params["time_idx"]] = df[ds_params["time_idx"]].astype(np.int64)
-    cat_cols = (
+    time_idx_col = ds_params["time_idx"]
+    df_full[time_idx_col] = df_full[time_idx_col].astype(np.int64)
+
+    all_cat_cols = (
         ds_params.get("static_categoricals", [])
         + ds_params.get("time_varying_known_categoricals", [])
         + ds_params.get("time_varying_unknown_categoricals", [])
     )
-    for c in cat_cols:
-        if c in df:
-            df[c] = df[c].astype(str)
+    for col in all_cat_cols:
+        if col in df_full.columns:
+            df_full[col] = df_full[col].astype(str)
+    print(f"Ensured '{time_idx_col}' is int64 and categorical columns are strings.")
 
-    dataset = TimeSeriesDataSet.from_parameters(ds_params, df, predict=True)
-    print(f"Reconstructed dataset with {len(dataset)} samples.")
+    full_dataset = TimeSeriesDataSet.from_parameters(ds_params, df_full, predict=False)
+    print(f"Recreated full dataset with {len(full_dataset)} samples.")
 
-    # ------------------------------------------------------------------#
-    # 3. Load model & run inference                                     #
-    # ------------------------------------------------------------------#
     model = GlobalTFT.load_from_checkpoint(
-        str(best), timeseries_dataset=dataset, map_location="cpu"
+        best, timeseries_dataset=full_dataset, map_location="cpu"
+    )
+    print("Model loaded successfully.")
+
+    tickers_to_evaluate = _cfg_list(cfg.evaluate.sample_tickers)
+    if not tickers_to_evaluate:
+        sys.exit("No tickers specified in cfg.evaluate.sample_tickers. Aborting.")
+
+    cfg_yaml = next(latest_run.glob("**/.hydra/config.yaml"), None)
+    run_cfg = OmegaConf.load(cfg_yaml) if cfg_yaml else cfg
+    group_id_col = _cfg_list(run_cfg.data.group_ids)[0]
+
+    ticker_map_path = Path(cfg.paths.data_dir) / "processed" / "ticker_map.parquet"
+    ticker_map = pl.read_parquet(ticker_map_path) if ticker_map_path.exists() else None
+
+    if ticker_map is None:
+        sys.exit("ticker_map.parquet not found. Cannot filter by ticker name.")
+
+    filtered_map = ticker_map.filter(pl.col("ticker").is_in(tickers_to_evaluate))
+
+    ticker_ids_to_evaluate_str = [
+        str(i) for i in filtered_map.select("ticker_id").to_series().to_list()
+    ]
+
+    if not ticker_ids_to_evaluate_str:
+        sys.exit(f"Could not find any of {tickers_to_evaluate} in the ticker_map.")
+
+    eval_dataset = full_dataset.filter(
+        lambda x: x[group_id_col].isin(ticker_ids_to_evaluate_str)
+    )
+    print(
+        f"Filtered dataset to {len(eval_dataset)} samples for tickers: {tickers_to_evaluate}"
     )
 
-    # --- MAJOR CHANGE: Use the training dataloader for plotting ---
-    # This ensures we get a continuous series of predictions to visualize.
-    # The metrics will be on the training set, but the plot will be meaningful.
-    print(
-        "Creating dataloader for evaluation (using train=True to get a plottable series)..."
-    )
-    loader = dataset.to_dataloader(
-        train=True,  # <<<<<<<<<<<<<<< CHANGED FROM False TO True
+    if len(eval_dataset) == 0:
+        sys.exit(
+            "Filtering resulted in an empty dataset. Check ticker names and data content."
+        )
+
+    loader = eval_dataset.to_dataloader(
+        train=True,
         batch_size=cfg.evaluate.batch_size,
-        shuffle=False,  # Keep shuffle=False to get points in time-order
+        shuffle=False,
         num_workers=cfg.evaluate.num_workers,
     )
-    print("Created dataloader.")
+    print("Created dataloader for evaluation.")
 
-    preds, trues = run_inference(model, loader, run_cfg)
+    # Pass the dataset object to run_inference so it can decode the IDs
+    preds, trues, short_tgt_names = run_inference(model, loader, run_cfg, full_dataset)
 
-    tgt_names = [t.replace("target_", "") for t in _cfg_list(run_cfg.data.target)]
-    metrics = evaluate(preds, trues, tgt_names)
+    metrics = evaluate(preds, trues, short_tgt_names)
 
-    print("\n--- In-sample metrics (from training set) ---")
+    print("\n--- Metrics for evaluated tickers ---")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
 
-    # ------------------------------------------------------------------#
-    # 4. Visuals + CSV / JSON output                                    #
-    # ------------------------------------------------------------------#
-    out_dir = Path(cfg.paths.log_dir) / "evaluation" / latest_run.name
+    out_dir = Path(log_dir) / "evaluation" / latest_run.name
 
-    ticker_map_pq = Path(cfg.paths.data_dir) / "processed" / "ticker_map.parquet"
-    if ticker_map_pq.exists():
-        plot_preds(
-            preds,
-            trues,
-            out_dir,
-            pl.read_parquet(ticker_map_pq),
-            cfg.evaluate.sample_tickers,
-            tgt_names,
-        )
-    else:
-        print("ticker_map.parquet not found – skipping plots.")
+    plot_preds(
+        preds,
+        trues,
+        out_dir,
+        ticker_map,
+        tickers_to_evaluate,
+        short_tgt_names,
+    )
 
     save_output(metrics, preds, trues, out_dir)
 
