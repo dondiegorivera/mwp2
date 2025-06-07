@@ -308,40 +308,46 @@ def main(cfg: DictConfig) -> None:
             "No 'default_reals_normalizer' specified in cfg.data.scalers. PTF will use its defaults for feature scaling."
         )
 
-    single_target_normalizer_prototype_name = "GroupNormalizer"  # Default
-    if (
-        OmegaConf.select(cfg, "data.scalers.target_normalizer") is not None
-    ):  # Check existence properly
+    # Default to the more robust EncoderNormalizer as per your analysis
+    single_target_normalizer_prototype_name = "EncoderNormalizer"
+    if OmegaConf.select(cfg, "data.scalers.target_normalizer") is not None:
         single_target_normalizer_prototype_name = cfg.data.scalers.target_normalizer
 
     valid_target_normalizer_names = [
-        "GroupNormalizer",
-        "EncoderNormalizer",
-        "StandardScaler",  # This refers to scikit-learn's StandardScaler
-        "NaNLabelEncoder",  # If target can be categorical
-        None,  # To explicitly use no normalizer (PTF will use TorchNormalizer(method="identity"))
+        "EncoderNormalizer",  # This is now the robust default
+        "GroupNormalizer",  # Available but not recommended for this problem
+        "StandardScaler",
+        "NaNLabelEncoder",
+        None,
     ]
     if (
         single_target_normalizer_prototype_name not in valid_target_normalizer_names
         and single_target_normalizer_prototype_name is not None
     ):
         print(
-            f"Warning: Unknown target_normalizer '{single_target_normalizer_prototype_name}'. Using GroupNormalizer as default."
+            f"Warning: Unknown target_normalizer '{single_target_normalizer_prototype_name}'. "
+            "Defaulting to EncoderNormalizer."
         )
-        single_target_normalizer_prototype_name = "GroupNormalizer"
+        single_target_normalizer_prototype_name = "EncoderNormalizer"
 
     final_target_normalizer = None
     if single_target_normalizer_prototype_name is None:
-        final_target_normalizer = None  # PTF default
+        final_target_normalizer = None
     elif len(target_list) > 1:
+        # Create a list of normalizer instances for multi-target learning
         list_of_normalizers_for_multi = []
-        for _ in target_list:  # Create a distinct normalizer instance for each target
-            if single_target_normalizer_prototype_name == "GroupNormalizer":
-                list_of_normalizers_for_multi.append(
-                    GroupNormalizer(groups=group_ids_list, transformation=None)
-                )
-            elif single_target_normalizer_prototype_name == "EncoderNormalizer":
+        for _ in target_list:
+            if single_target_normalizer_prototype_name == "EncoderNormalizer":
                 list_of_normalizers_for_multi.append(EncoderNormalizer())
+            elif single_target_normalizer_prototype_name == "GroupNormalizer":
+                # Using the robust settings you recommended as a fallback
+                list_of_normalizers_for_multi.append(
+                    GroupNormalizer(
+                        groups=group_ids_list,
+                        method="robust",
+                        transformation="softplus",
+                    )
+                )
             elif single_target_normalizer_prototype_name == "StandardScaler":
                 list_of_normalizers_for_multi.append(SklearnStandardScaler())
             elif single_target_normalizer_prototype_name == "NaNLabelEncoder":
@@ -350,13 +356,14 @@ def main(cfg: DictConfig) -> None:
             final_target_normalizer = MultiNormalizer(
                 normalizers=list_of_normalizers_for_multi
             )
-    elif target_list:  # Single target
-        if single_target_normalizer_prototype_name == "GroupNormalizer":
-            final_target_normalizer = GroupNormalizer(
-                groups=group_ids_list, transformation=None
-            )
-        elif single_target_normalizer_prototype_name == "EncoderNormalizer":
+
+    elif target_list:  # Single target case
+        if single_target_normalizer_prototype_name == "EncoderNormalizer":
             final_target_normalizer = EncoderNormalizer()
+        elif single_target_normalizer_prototype_name == "GroupNormalizer":
+            final_target_normalizer = GroupNormalizer(
+                groups=group_ids_list, method="robust", transformation="softplus"
+            )
         elif single_target_normalizer_prototype_name == "StandardScaler":
             final_target_normalizer = SklearnStandardScaler()
         elif single_target_normalizer_prototype_name == "NaNLabelEncoder":

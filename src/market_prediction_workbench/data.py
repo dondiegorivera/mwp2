@@ -351,6 +351,31 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         (log_close.shift(-20) - log_close).over("ticker_id").alias("target_20d"),
     )
 
+    # --- ADDED PER YOUR RECOMMENDATION ---
+    # Clip obviously impossible returns to prevent outlier explosion.
+    # A 25% daily return is already extreme. We nullify anything beyond that.
+    MAX_ABS_DAILY_RETURN = 0.25
+    print(
+        f"Clipping targets with absolute daily log-return > {MAX_ABS_DAILY_RETURN}..."
+    )
+    df = df.with_columns(
+        [
+            pl.when(pl.col("target_1d").abs() > MAX_ABS_DAILY_RETURN)
+            .then(None)
+            .otherwise(pl.col("target_1d"))
+            .alias("target_1d"),
+            pl.when(pl.col("target_5d").abs() > MAX_ABS_DAILY_RETURN * 5)
+            .then(None)
+            .otherwise(pl.col("target_5d"))
+            .alias("target_5d"),
+            pl.when(pl.col("target_20d").abs() > MAX_ABS_DAILY_RETURN * 20)
+            .then(None)
+            .otherwise(pl.col("target_20d"))
+            .alias("target_20d"),
+        ]
+    )
+    # --- END OF ADDED BLOCK ---
+
     # --- Feature Engineering ---
     # 1. Known-future (calendar) features
     df = df.with_columns(
@@ -517,43 +542,38 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-# Update the __main__ block again to use the modified create_features_and_targets
 if __name__ == "__main__":
     DATA_DIR = Path("data")
-    RAW_DATA_PATH = (
-        DATA_DIR / "raw" / "stock_data.csv"
-    )  # Make sure this is your actual raw data file name
+    RAW_DATA_PATH = DATA_DIR / "raw" / "stock_data.csv"
     PROCESSED_DATA_DIR = DATA_DIR / "processed"
 
-    # Define the final processed file path
     PROCESSED_PARQUET_PATH = PROCESSED_DATA_DIR / "processed_data.parquet"
 
-    # This is our full pipeline
     print("--- Starting Data Pipeline ---")
     df_initial = load_and_clean_data(RAW_DATA_PATH)
+    initial_rows = df_initial.height
+
     df_mapped = create_mappings(df_initial, PROCESSED_DATA_DIR)
     df_reindexed = reindex_and_fill_gaps(df_mapped)
-    df_final = create_features_and_targets(df_reindexed)  # Use the modified function
+    df_final = create_features_and_targets(df_reindexed)
 
     print("\n--- Final Processed DataFrame ---")
-    if df_final.height > 0:  # This line should no longer cause an error
+    if df_final.height > 0:
         print(df_final.head())
-        # Add a check for infinities in the final dataframe before saving
-        for col_name in df_final.columns:
-            if df_final[col_name].dtype in [pl.Float32, pl.Float64]:
-                if df_final[col_name].is_infinite().any():
-                    print(
-                        f"Warning: Column '{col_name}' contains infinite values before saving!"
-                    )
-                if df_final[col_name].is_nan().any():
-                    print(
-                        f"Warning: Column '{col_name}' contains NaN values before saving (should have been dropped)!"
-                    )
 
-        print(
-            f"Data retention: {len(df_final)}/{len(df_initial)} ({len(df_final)/len(df_initial):.1%})"
-        )
-        print(f"Null values: {df_final.null_count().sum(axis=1).sum()} total")
+        # --- CORRECTED DEBUGGING STATEMENTS ---
+        final_rows = df_final.height
+        retention = (final_rows / initial_rows) * 100 if initial_rows > 0 else 0
+        print(f"\nData retention: {final_rows}/{initial_rows} ({retention:.1f}%)")
+
+        # Check for any remaining nulls (should be zero) using idiomatic Polars
+        total_nulls = df_final.null_count().select(pl.sum_horizontal("*")).item()
+        print(f"Total null values in final data: {total_nulls}")
+        if total_nulls > 0:
+            print("Warning: Null values detected in final DataFrame!")
+            print(df_final.null_count())
+        # --- END CORRECTION ---
+
         print(f"\nSaving final processed data to {PROCESSED_PARQUET_PATH}...")
         df_final.write_parquet(PROCESSED_PARQUET_PATH)
     else:
