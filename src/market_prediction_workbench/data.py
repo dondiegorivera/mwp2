@@ -451,56 +451,65 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
 
     # --- Final Cleanup ---
 
-    # 1. Drop intermediate columns used for feature creation
+    # 1. Drop intermediate columns
     intermediate_cols = ["price_change", "gain", "loss", "avg_gain", "avg_loss"]
     cols_to_drop_now = [col for col in intermediate_cols if col in df.columns]
     if cols_to_drop_now:
         df = df.drop(cols_to_drop_now)
 
-    # 2. Explicitly convert NaNs and Infinities in float columns to Polars nulls (None)
+    # 2. Convert any generated infinities or NaNs in float columns to proper nulls
     float_cols = [
         col_name
         for col_name, dtype in df.schema.items()
-        if dtype == pl.Float32 or dtype == pl.Float64
+        if dtype in [pl.Float32, pl.Float64]
     ]
     for col_name in float_cols:
         df = df.with_columns(
-            pl.when(
-                pl.col(col_name).is_nan() | pl.col(col_name).is_infinite()
-            )  # Check for NaN or Inf
-            .then(None)  # Convert to proper Polars null
+            pl.when(pl.col(col_name).is_nan() | pl.col(col_name).is_infinite())
+            .then(None)
             .otherwise(pl.col(col_name))
             .alias(col_name)
         )
 
-    # --- Debugging NaN counts before drop_nulls() ---
-    # print("\n--- NaN/Null Counts Before drop_nulls() [After explicit NaN/Inf -> None conversion] ---")
-    # problem_cols = ["target_20d", "skew_20d", "kurtosis_20d"]
-    # for col_name in df.columns:
-    #    if col_name in problem_cols or df[col_name].is_null().any():
-    #        null_count = df[col_name].is_null().sum()
-    #        # is_nan() might be 0 now if all NaNs became Polars nulls
-    #        nan_count_specific = df[col_name].is_nan().sum() if df[col_name].dtype in [pl.Float32, pl.Float64] else 0
-    #        dtype_info = df[col_name].dtype
-    #        print(f"Column: {col_name:<20} | Nulls: {null_count:<7} | NaNs (float only): {nan_count_specific:<7} | Dtype: {dtype_info}")
-    # print("-----------------------------------------------------------------------------------\n")
-    # --- End Debugging ---
+    # --- START: NEW, MORE ROBUST NULL HANDLING ---
 
-    # 3. Drop all rows that contain any Polars null values
+    # 3. Drop rows only where essential targets are null.
+    # This keeps the maximum amount of historical data for feature generation.
+    target_cols = ["target_1d", "target_5d", "target_20d"]
+    df = df.drop_nulls(subset=target_cols)
+    print(f"Shape after dropping rows with null targets: {df.shape}")
+
+    # 4. Forward-fill features to handle nulls at the start of each series.
+    # Then fill any remaining nulls (at the very beginning) with 0.
+    # Exclude IDs, dates, and targets from this fill.
+    feature_cols = [
+        col
+        for col in df.columns
+        if col not in ["ticker", "date", "ticker_id", "sector_id"] + target_cols
+    ]
+    df = df.with_columns(
+        pl.col(feature_cols).forward_fill().over("ticker_id")
+    ).with_columns(pl.col(feature_cols).fill_null(0.0))
+    print(f"Shape after forward-filling and zero-filling features: {df.shape}")
+
+    # 5. As a final safety check, drop any row that might still have a null value.
+    # This should now drop very few, if any, rows.
     df = df.drop_nulls()
 
-    # 4. Sort the data
+    # --- END: NEW, MORE ROBUST NULL HANDLING ---
+
+    # 6. Sort the data
     df = df.sort("ticker_id", "date")
 
     print(
-        f"Feature creation complete. After NaN/inf handling AND drop_nulls(), shape: {df.shape}"
+        f"Feature creation complete. After NaN/inf handling AND FINAL drop_nulls(), shape: {df.shape}"
     )
     if df.height == 0:
         raise ValueError(
             "All data was dropped after feature engineering and NaN/inf handling. Check data quality and feature logic."
         )
 
-    # 5. Create the final time_idx
+    # 7. Create the final time_idx
     df = df.with_columns(
         time_idx=(pl.col("date").rank("ordinal").over("ticker_id") - 1)
     )
@@ -541,6 +550,10 @@ if __name__ == "__main__":
                         f"Warning: Column '{col_name}' contains NaN values before saving (should have been dropped)!"
                     )
 
+        print(
+            f"Data retention: {len(df_final)}/{len(df_initial)} ({len(df_final)/len(df_initial):.1%})"
+        )
+        print(f"Null values: {df_final.null_count().sum(axis=1).sum()} total")
         print(f"\nSaving final processed data to {PROCESSED_PARQUET_PATH}...")
         df_final.write_parquet(PROCESSED_PARQUET_PATH)
     else:

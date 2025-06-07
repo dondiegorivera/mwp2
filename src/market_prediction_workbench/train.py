@@ -8,8 +8,12 @@ from pathlib import Path
 import numpy as np
 import torch  # Added for torch.utils.data.WeightedRandomSampler and DataLoader
 from torch.utils.data import DataLoader  # Added for DataLoader
+import os
+import shutil  # For copying files/directories
+from hydra.core.hydra_config import HydraConfig  # To get Hydra's output path
 
 # Import our custom modules
+from market_prediction_workbench.model import GlobalTFT
 
 # Import pytorch-forecasting specific items
 from pytorch_forecasting import TimeSeriesDataSet
@@ -31,6 +35,11 @@ from pytorch_lightning.callbacks import (
 
 # Import scikit-learn's StandardScaler if we intend to use it
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
+
+
+torch.backends.cudnn.benchmark = True  # autotune conv/LSTM kernels
+torch.backends.cuda.matmul.allow_tf32 = True  # use TF32 tensor cores
+
 
 # Set matmul precision for Tensor Cores if applicable
 # This was the fix for the previous RuntimeError regarding device mismatch during matmul/attention
@@ -479,12 +488,23 @@ def main(cfg: DictConfig) -> None:
                         num_samples=len(weights_for_rows_sampler),
                         replacement=True,
                     )
+
+                    num_cpu = os.cpu_count()
                     train_loader = timeseries_dataset.to_dataloader(
                         train=True,
                         batch_size=cfg.trainer.batch_size,
                         sampler=sampler,
-                        num_workers=cfg.trainer.num_workers,
+                        num_workers=(
+                            min(num_cpu - 2, cfg.trainer.num_workers)
+                            if num_cpu and num_cpu > 2
+                            else cfg.trainer.num_workers
+                        ),
                         shuffle=False,
+                        pin_memory=True,
+                        persistent_workers=(
+                            True if cfg.trainer.num_workers > 0 else False
+                        ),
+                        prefetch_factor=4,  # default is 2 – double it
                     )
                     train_loader_created_with_sampler = True
                     print(
@@ -561,6 +581,32 @@ def main(cfg: DictConfig) -> None:
             save_dir=str(Path(cfg.paths.log_dir) / "wandb"),
         )
         print("WandB Logger initialized.")
+
+        # --- REVISED: COPY HYDRA CONFIG TO WANDB RUN DIRECTORY ---
+        # Use logger.log_dir which is the specific directory for this run.
+        # This is the same directory ModelCheckpoint uses.
+        if logger.log_dir:
+            wandb_run_dir = Path(logger.log_dir)
+            hydra_cfg_path = Path(HydraConfig.get().runtime.output_dir) / ".hydra"
+            target_hydra_path = wandb_run_dir / ".hydra"
+
+            print(
+                f"Copying Hydra config from {hydra_cfg_path} to {target_hydra_path}..."
+            )
+            try:
+                if target_hydra_path.exists():
+                    print(
+                        f".hydra directory already exists at {target_hydra_path}. Overwriting."
+                    )
+                    shutil.rmtree(target_hydra_path)
+                shutil.copytree(hydra_cfg_path, target_hydra_path)
+                print("Successfully copied .hydra config directory.")
+            except Exception as e:
+                print(f"Error copying .hydra directory: {e}")
+        else:
+            print("Warning: Could not determine logger.log_dir. Skipping config copy.")
+        # --- END OF REVISED LOGIC ---
+
     else:
         print("WandB Logger is disabled (use_wandb=false or key missing).")
 

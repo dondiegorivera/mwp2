@@ -9,6 +9,10 @@ from pytorch_forecasting.models.temporal_fusion_transformer._tft import (
 from pytorch_forecasting.metrics import QuantileLoss, MultiLoss
 import numpy as np
 
+# Added for the new __init__ logic
+from pytorch_forecasting import TimeSeriesDataSet
+import pandas as pd
+
 
 class TemporalFusionTransformerWithDevice(TemporalFusionTransformer):
     def get_attention_mask(self, *args, **kwargs) -> torch.Tensor:
@@ -63,48 +67,74 @@ class TemporalFusionTransformerWithDevice(TemporalFusionTransformer):
 class GlobalTFT(pl.LightningModule):
     def __init__(
         self,
-        timeseries_dataset,
         model_specific_params: dict,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
+        timeseries_dataset: TimeSeriesDataSet | None = None,
+        timeseries_dataset_params: dict | None = None,
     ):
         super().__init__()
-        init_model_params_copy = model_specific_params.copy()
-        hparams_for_global_tft = {
-            "learning_rate": learning_rate,
-            "weight_decay": weight_decay,
-            "model_specific_params": {
-                k: v
-                for k, v in init_model_params_copy.items()
-                if not isinstance(v, nn.Module)
-            },
-        }
-        self.save_hyperparameters(hparams_for_global_tft, ignore=["timeseries_dataset"])
 
-        # FIX: Properly handle multiple targets and quantiles
+        if timeseries_dataset is None and timeseries_dataset_params is None:
+            raise ValueError(
+                "Either `timeseries_dataset` or `timeseries_dataset_params` must be provided."
+            )
+
+        # If loading from checkpoint, timeseries_dataset might be None.
+        # Reconstruct a skeleton dataset from params to initialize the model.
+        if timeseries_dataset is None:
+            # This allows loading a model without having to load the data first.
+            # The actual data is needed for the dataloaders, but not for model architecture.
+            timeseries_dataset = TimeSeriesDataSet.from_parameters(
+                timeseries_dataset_params, pd.DataFrame(), predict=True
+            )
+
+        # The original __init__ logic can proceed from here.
         num_targets = len(timeseries_dataset.target_names)
+
+        loss_instance = model_specific_params.get("loss")
         quantiles = (
-            model_specific_params["loss"].quantiles
-            if "loss" in model_specific_params
-            else [0.5]
+            loss_instance.quantiles if hasattr(loss_instance, "quantiles") else [0.5]
         )
         output_size = num_targets * len(quantiles)
+        if "output_size" not in model_specific_params:
+            model_specific_params["output_size"] = output_size
 
-        # Ensure output size is set correctly
-        model_specific_params["output_size"] = output_size
-        self.save_hyperparameters(ignore=["timeseries_dataset"])
+        # We save the parameters, not the full dataset object.
+        # The model_specific_params might contain non-serializable objects (like the loss function instance)
+        # so we clean it for saving.
+
+        if isinstance(model_specific_params["output_size"], int):
+            model_specific_params["output_size"] = [
+                model_specific_params["output_size"]
+            ] * num_targets
+
+        init_model_params_copy = model_specific_params.copy()
+
+        cleaned_model_params = {
+            k: v
+            for k, v in init_model_params_copy.items()
+            if not isinstance(v, (nn.Module, torch.nn.modules.loss._Loss))
+        }
+
+        # Save hyperparameters for checkpointing. This is crucial for reloading.
+        self.save_hyperparameters(
+            {
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "model_specific_params": cleaned_model_params,
+                "timeseries_dataset_params": timeseries_dataset.get_parameters(),
+            }
+        )
 
         self.model = TemporalFusionTransformerWithDevice.from_dataset(
             timeseries_dataset,
-            learning_rate=learning_rate,  # TFT uses this for its optimizer if one is not provided by PTL
-            weight_decay=weight_decay,  # Same for weight_decay
-            **init_model_params_copy,  # This includes the instantiated loss object
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            **init_model_params_copy,  # Pass original params with loss object
         )
 
-        # Explicitly set max_prediction_length on the loss metric(s) if not already set
-        # This is crucial for MaskedMetric's mask creation logic.
         dataset_max_pred_len = timeseries_dataset.max_prediction_length
-
         current_loss_module = self.model.loss
         if isinstance(current_loss_module, MultiLoss):
             for metric in current_loss_module.metrics:
@@ -238,7 +268,15 @@ class GlobalTFT(pl.LightningModule):
         target = target.unsqueeze(-1)  # Add channel dimension
 
         loss_val = self.model.loss(out.prediction, target)
-        self.log("train_loss", loss_val)
+        bs = target.size(0)  # ← exact batch size
+        self.log(
+            "train_loss",
+            loss_val,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=bs,
+        )  # ← no more warning
         return loss_val
 
     def validation_step(self, batch, batch_idx):
@@ -254,7 +292,12 @@ class GlobalTFT(pl.LightningModule):
         return loss_val
 
     def configure_optimizers(self):
-        optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        optimizer = AdamW(
+            self.parameters(),
+            lr=self.hparams.learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            fused=True,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             patience=3,
