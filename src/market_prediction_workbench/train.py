@@ -6,11 +6,11 @@ import polars as pl_df  # Renamed to avoid conflict with pytorch_lightning.pl
 import pandas as pd
 from pathlib import Path
 import numpy as np
-import torch  # Added for torch.utils.data.WeightedRandomSampler and DataLoader
-from torch.utils.data import DataLoader  # Added for DataLoader
+import torch
+from torch.utils.data import DataLoader
 import os
-import shutil  # For copying files/directories
-from hydra.core.hydra_config import HydraConfig  # To get Hydra's output path
+import shutil
+from hydra.core.hydra_config import HydraConfig
 
 # Import our custom modules
 from market_prediction_workbench.model import GlobalTFT
@@ -19,12 +19,10 @@ from market_prediction_workbench.model import GlobalTFT
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import (
     GroupNormalizer,
-    NaNLabelEncoder,  # Keep this import for type checking if needed
+    NaNLabelEncoder,
     EncoderNormalizer,
     MultiNormalizer,
 )
-
-# from pytorch_forecasting.metrics import QuantileLoss # Instantiated by hydra
 
 # Import Lightning Callbacks
 from pytorch_lightning.callbacks import (
@@ -37,19 +35,13 @@ from pytorch_lightning.callbacks import (
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
 
 
-torch.backends.cudnn.benchmark = True  # autotune conv/LSTM kernels
-torch.backends.cuda.matmul.allow_tf32 = True  # use TF32 tensor cores
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
 
-
-# Set matmul precision for Tensor Cores if applicable
-# This was the fix for the previous RuntimeError regarding device mismatch during matmul/attention
 if torch.cuda.is_available():
-    # Check if the GPU supports Tensor Cores (Compute Capability 7.0+)
-    # This is a heuristic; specific precision ('high' or 'medium') might depend on the exact GPU and desired trade-off.
-    # For RTX 4090 (Ada Lovelace), CC is 8.9, so this will apply.
     try:
         if torch.cuda.get_device_capability()[0] >= 7:
-            torch.set_float32_matmul_precision("medium")  # or 'high'
+            torch.set_float32_matmul_precision("medium")
             print("PyTorch float32 matmul precision set to 'medium' for Tensor Cores.")
         else:
             print(
@@ -63,7 +55,7 @@ else:
     print("CUDA not available. Running on CPU. Matmul precision setting skipped.")
 
 
-# MODIFIED function to be more robust
+# RESTORED: Full, verbose, and robust helper function from your original file
 def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
     embedding_sizes = {}
 
@@ -171,6 +163,16 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
     return embedding_sizes
 
 
+def split_before(ds: TimeSeriesDataSet, pct: float = 0.8):
+    cutoff = int(ds.data[ds.time_idx].max() * pct)
+    train_df = ds.data[ds.data[ds.time_idx] <= cutoff]
+    val_df = ds.data[ds.data[ds.time_idx] > cutoff]
+    return (
+        TimeSeriesDataSet.from_dataset(ds, train_df),
+        TimeSeriesDataSet.from_dataset(ds, val_df),
+    )
+
+
 @hydra.main(config_path="../../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     print("--- Configuration ---")
@@ -188,12 +190,8 @@ def main(cfg: DictConfig) -> None:
         return
 
     polars_data_df = pl_df.read_parquet(processed_data_path)
-    print(f"Loaded processed Polars data. Shape: {polars_data_df.shape}")
-    polars_data_df = polars_data_df.rename(
-        {col: str(col) for col in polars_data_df.columns}
-    )
     data_pd = polars_data_df.to_pandas()
-    print(f"Converted to Pandas DataFrame. Shape: {data_pd.shape}")
+    print(f"Loaded and converted to Pandas DataFrame. Shape: {data_pd.shape}")
 
     time_idx_col_name = str(cfg.data.time_idx)
     if time_idx_col_name in data_pd.columns:
@@ -247,17 +245,12 @@ def main(cfg: DictConfig) -> None:
             + time_varying_unknown_categoricals_list
         )
     )
-
     for cat_col_name_str in all_categorical_cols_from_config:
         if cat_col_name_str in data_pd.columns:
-            # Check if not already object, string, or pandas dedicated string type
             if (
                 data_pd[cat_col_name_str].dtype != object
-                and data_pd[cat_col_name_str].dtype
-                != str  # Python's built-in str type for columns
-                and not pd.api.types.is_string_dtype(
-                    data_pd[cat_col_name_str]
-                )  # Pandas' extension string dtype
+                and data_pd[cat_col_name_str].dtype != str
+                and not pd.api.types.is_string_dtype(data_pd[cat_col_name_str])
             ):
                 print(
                     f"Casting categorical column '{cat_col_name_str}' to string. Original dtype: {data_pd[cat_col_name_str].dtype}"
@@ -268,174 +261,130 @@ def main(cfg: DictConfig) -> None:
                 f"Warning: Configured categorical column '{cat_col_name_str}' not found in DataFrame for dtype casting."
             )
 
-    max_encoder_length = cfg.data.lookback_days
-    max_prediction_length = cfg.data.max_prediction_horizon
-    scalers = {}
-    if cfg.data.get("scalers") and cfg.data.scalers.get("default_reals_normalizer"):
-        default_normalizer_name = cfg.data.scalers.default_reals_normalizer
-        valid_normalizer_names = [
-            "GroupNormalizer",
-            "EncoderNormalizer",
-            "StandardScaler",  # This refers to our SklearnStandardScaler wrapper
-        ]
-        if default_normalizer_name not in valid_normalizer_names:
-            print(
-                f"Warning: Unknown default_reals_normalizer '{default_normalizer_name}'. Defaulting to EncoderNormalizer."
-            )
-            default_normalizer_name = "EncoderNormalizer"
+    # --- CORRECTED: Split DataFrame BEFORE creating TimeSeriesDataSet objects ---
+    max_time_idx = data_pd[time_idx_str].max()
+    train_cutoff_idx = int(max_time_idx * 0.8)
+    print(f"Splitting data for training/validation at time_idx: {train_cutoff_idx}")
 
-        reals_to_scale = (
-            time_varying_unknown_reals_list
-            + time_varying_known_reals_list
-            + static_reals_list
-        )
-        reals_to_scale = list(dict.fromkeys(reals_to_scale))  # Unique columns
+    train_df = data_pd[data_pd[time_idx_str] <= train_cutoff_idx]
+    val_df = data_pd[data_pd[time_idx_str] > train_cutoff_idx]
 
-        for col_name_str_loop_var in reals_to_scale:
-            current_col_name = str(col_name_str_loop_var)
-            if current_col_name in data_pd.columns:
-                if default_normalizer_name == "GroupNormalizer":
-                    scalers[current_col_name] = GroupNormalizer(
-                        groups=group_ids_list,  # Ensure group_ids_list is correctly populated
-                        transformation=None,  # Or specify transformation if needed
-                    )
-                elif default_normalizer_name == "EncoderNormalizer":
-                    scalers[current_col_name] = EncoderNormalizer()
-                elif default_normalizer_name == "StandardScaler":
-                    scalers[current_col_name] = SklearnStandardScaler()
-    else:
-        print(
-            "No 'default_reals_normalizer' specified in cfg.data.scalers. PTF will use its defaults for feature scaling."
-        )
+    print(f"Training DataFrame shape: {train_df.shape}")
+    print(f"Validation DataFrame shape: {val_df.shape}")
 
-    # Default to the more robust EncoderNormalizer as per your analysis
-    single_target_normalizer_prototype_name = "EncoderNormalizer"
-    if OmegaConf.select(cfg, "data.scalers.target_normalizer") is not None:
-        single_target_normalizer_prototype_name = cfg.data.scalers.target_normalizer
-
-    valid_target_normalizer_names = [
-        "EncoderNormalizer",  # This is now the robust default
-        "GroupNormalizer",  # Available but not recommended for this problem
-        "StandardScaler",
-        "NaNLabelEncoder",
-        None,
-    ]
-    if (
-        single_target_normalizer_prototype_name not in valid_target_normalizer_names
-        and single_target_normalizer_prototype_name is not None
-    ):
-        print(
-            f"Warning: Unknown target_normalizer '{single_target_normalizer_prototype_name}'. "
-            "Defaulting to EncoderNormalizer."
-        )
-        single_target_normalizer_prototype_name = "EncoderNormalizer"
-
-    final_target_normalizer = None
-    if single_target_normalizer_prototype_name is None:
-        final_target_normalizer = None
-    elif len(target_list) > 1:
-        # Create a list of normalizer instances for multi-target learning
-        list_of_normalizers_for_multi = []
-        for _ in target_list:
-            if single_target_normalizer_prototype_name == "EncoderNormalizer":
-                list_of_normalizers_for_multi.append(EncoderNormalizer())
-            elif single_target_normalizer_prototype_name == "GroupNormalizer":
-                # Using the robust settings you recommended as a fallback
-                list_of_normalizers_for_multi.append(
-                    GroupNormalizer(
-                        groups=group_ids_list,
-                        method="robust",
-                        transformation="softplus",
-                    )
-                )
-            elif single_target_normalizer_prototype_name == "StandardScaler":
-                list_of_normalizers_for_multi.append(SklearnStandardScaler())
-            elif single_target_normalizer_prototype_name == "NaNLabelEncoder":
-                list_of_normalizers_for_multi.append(NaNLabelEncoder())
-        if list_of_normalizers_for_multi:
-            final_target_normalizer = MultiNormalizer(
-                normalizers=list_of_normalizers_for_multi
-            )
-
-    elif target_list:  # Single target case
-        if single_target_normalizer_prototype_name == "EncoderNormalizer":
-            final_target_normalizer = EncoderNormalizer()
-        elif single_target_normalizer_prototype_name == "GroupNormalizer":
-            final_target_normalizer = GroupNormalizer(
-                groups=group_ids_list, method="robust", transformation="softplus"
-            )
-        elif single_target_normalizer_prototype_name == "StandardScaler":
-            final_target_normalizer = SklearnStandardScaler()
-        elif single_target_normalizer_prototype_name == "NaNLabelEncoder":
-            final_target_normalizer = NaNLabelEncoder()
-
-    if (
-        not final_target_normalizer
-        and target_list
-        and single_target_normalizer_prototype_name is not None
-    ):
-        print(
-            f"Warning: Target normalizer could not be constructed for {single_target_normalizer_prototype_name} and targets {target_list}. Check logic."
-        )
-    elif not target_list:
-        print(
-            "Warning: No targets defined in cfg.data.target. Target normalizer set to None."
-        )
-
-    print("Creating TimeSeriesDataSet...")
-    all_config_cols_set = set(
-        group_ids_list
-        + [time_idx_str]
-        + target_list
-        + static_categoricals_list
-        + static_reals_list
-        + time_varying_known_categoricals_list
-        + time_varying_known_reals_list
-        + time_varying_unknown_categoricals_list
-        + time_varying_unknown_reals_list
-    )
-    for col_name_check in all_config_cols_set:
-        if col_name_check not in data_pd.columns:
-            raise ValueError(
-                f"Configuration error: Column '{col_name_check}' from config not in DataFrame. Available: {list(data_pd.columns)}"
-            )
-
-    print(
-        f"Instantiating TimeSeriesDataSet. Static categoricals list from config: {static_categoricals_list}"
-    )
-    timeseries_dataset = TimeSeriesDataSet(
-        data_pd,
+    # Common parameters for both datasets
+    dataset_params = dict(
         time_idx=time_idx_str,
         target=target_list[0] if len(target_list) == 1 else target_list,
         group_ids=group_ids_list,
-        max_encoder_length=max_encoder_length,
-        max_prediction_length=max_prediction_length,
+        max_encoder_length=cfg.data.lookback_days,
+        max_prediction_length=cfg.data.max_prediction_horizon,
         static_categoricals=static_categoricals_list,
         static_reals=static_reals_list,
         time_varying_known_categoricals=time_varying_known_categoricals_list,
         time_varying_known_reals=time_varying_known_reals_list,
         time_varying_unknown_categoricals=time_varying_unknown_categoricals_list,
         time_varying_unknown_reals=time_varying_unknown_reals_list,
-        target_normalizer=final_target_normalizer,
-        scalers=scalers if scalers else {},
-        categorical_encoders=None,
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
         allow_missing_timesteps=True,
     )
-    print("TimeSeriesDataSet created successfully (using all data).")
-    print(
-        f"  DEBUG: TimeSeriesDataSet.static_categoricals (property): {timeseries_dataset.static_categoricals}"
+
+    # Scaler and Normalizer Logic (applied to training_dataset first)
+    scalers = {}
+    if cfg.data.get("scalers") and cfg.data.scalers.get("default_reals_normalizer"):
+        default_normalizer_name = cfg.data.scalers.default_reals_normalizer
+        reals_to_scale = list(
+            dict.fromkeys(
+                time_varying_unknown_reals_list
+                + time_varying_known_reals_list
+                + static_reals_list
+            )
+        )
+        for col in reals_to_scale:
+            if default_normalizer_name == "GroupNormalizer":
+                scalers[col] = GroupNormalizer(
+                    groups=group_ids_list, method="robust", transformation="softplus"
+                )
+            elif default_normalizer_name == "EncoderNormalizer":
+                scalers[col] = EncoderNormalizer()
+            elif default_normalizer_name == "StandardScaler":
+                scalers[col] = SklearnStandardScaler()
+    else:
+        print(
+            "No 'default_reals_normalizer' specified. Using GroupNormalizer as default."
+        )
+        reals_to_scale = list(
+            dict.fromkeys(
+                time_varying_unknown_reals_list
+                + time_varying_known_reals_list
+                + static_reals_list
+            )
+        )
+        for col in reals_to_scale:
+            scalers[str(col)] = GroupNormalizer(
+                groups=group_ids_list, method="robust", transformation="softplus"
+            )
+
+    single_target_normalizer_prototype_name = OmegaConf.select(
+        cfg, "data.scalers.target_normalizer", default="GroupNormalizer"
     )
-    print(
-        f"  DEBUG: TimeSeriesDataSet.categoricals (property): {timeseries_dataset.categoricals}"
+    final_target_normalizer = None
+    if single_target_normalizer_prototype_name:
+        if len(target_list) > 1:
+            normalizers_list = []
+            for _ in target_list:
+                if single_target_normalizer_prototype_name == "GroupNormalizer":
+                    normalizers_list.append(
+                        GroupNormalizer(
+                            groups=group_ids_list,
+                            method="robust",
+                            transformation="softplus",
+                        )
+                    )
+                elif single_target_normalizer_prototype_name == "EncoderNormalizer":
+                    normalizers_list.append(EncoderNormalizer())
+                elif single_target_normalizer_prototype_name == "StandardScaler":
+                    normalizers_list.append(SklearnStandardScaler())
+            if normalizers_list:
+                final_target_normalizer = MultiNormalizer(normalizers=normalizers_list)
+        elif target_list:
+            if single_target_normalizer_prototype_name == "GroupNormalizer":
+                final_target_normalizer = GroupNormalizer(
+                    groups=group_ids_list, method="robust", transformation="softplus"
+                )
+            elif single_target_normalizer_prototype_name == "EncoderNormalizer":
+                final_target_normalizer = EncoderNormalizer()
+            elif single_target_normalizer_prototype_name == "StandardScaler":
+                final_target_normalizer = SklearnStandardScaler()
+
+    # Create training dataset. This dataset "learns" the scalers.
+    print("Creating training TimeSeriesDataSet...")
+    training_dataset = TimeSeriesDataSet(
+        train_df,
+        **dataset_params,
+        scalers=scalers,
+        target_normalizer=final_target_normalizer,
     )
+    print("Training TimeSeriesDataSet created successfully.")
+
+    # Create validation dataset from the training dataset to ensure scalers are reused.
+    print("Creating validation TimeSeriesDataSet from training dataset...")
+    validation_dataset = TimeSeriesDataSet.from_dataset(
+        training_dataset, val_df, allow_missing_timesteps=True
+    )
+    print("Validation TimeSeriesDataSet created successfully.")
+
+    if len(training_dataset) == 0 or len(validation_dataset) == 0:
+        raise ValueError(
+            "Train/validation split resulted in an empty dataset. Check split logic and data range."
+        )
     print(
-        f"  DEBUG: TimeSeriesDataSet._categorical_encoders (before calling get_embedding_sizes_for_tft): {timeseries_dataset._categorical_encoders}"
+        f"Training samples: {len(training_dataset)}, Validation samples: {len(validation_dataset)}"
     )
 
-    calculated_embedding_sizes = get_embedding_sizes_for_tft(timeseries_dataset)
+    calculated_embedding_sizes = get_embedding_sizes_for_tft(training_dataset)
 
     model_module = hydra.utils.get_class(cfg.model._target_)
     model_specific_params_from_cfg = {
@@ -447,106 +396,43 @@ def main(cfg: DictConfig) -> None:
     if "loss" in model_specific_params_from_cfg and isinstance(
         model_specific_params_from_cfg["loss"], DictConfig
     ):
-        print("Instantiating loss function from config...")
         model_specific_params_from_cfg["loss"] = hydra.utils.instantiate(
             model_specific_params_from_cfg["loss"]
         )
-        print(f"Loss function instantiated: {model_specific_params_from_cfg['loss']}")
 
     model_specific_params_from_cfg["embedding_sizes"] = calculated_embedding_sizes
 
     model = model_module(
-        timeseries_dataset=timeseries_dataset,
+        timeseries_dataset=training_dataset,  # Initialize model with training dataset parameters
         model_specific_params=model_specific_params_from_cfg,
         learning_rate=cfg.model.learning_rate,
         weight_decay=cfg.model.weight_decay,
     )
     print(f"Model {cfg.model._target_} (GlobalTFT wrapper) initialized.")
 
-    ticker_id_col_for_sampler = group_ids_list[0] if group_ids_list else None
-    train_loader_created_with_sampler = False
+    # REMOVED WeightedRandomSampler logic
+    print("Using default shuffling for train_loader.")
+    num_cpu = os.cpu_count()
+    train_loader = training_dataset.to_dataloader(
+        train=True,
+        batch_size=cfg.trainer.batch_size,
+        num_workers=(
+            min(num_cpu - 2, cfg.trainer.num_workers)
+            if num_cpu and num_cpu > 2
+            else cfg.trainer.num_workers
+        ),
+        shuffle=True,
+        pin_memory=True,
+        persistent_workers=True if cfg.trainer.num_workers > 0 else False,
+        prefetch_factor=4,
+    )
 
-    if ticker_id_col_for_sampler and ticker_id_col_for_sampler in data_pd:
-        decoded_idx_df = timeseries_dataset.decoded_index
-        if ticker_id_col_for_sampler in decoded_idx_df.columns:
-            value_counts_sampler = decoded_idx_df[
-                ticker_id_col_for_sampler
-            ].value_counts()
-
-            if not value_counts_sampler.empty:
-                weights_map_sampler = 1.0 / value_counts_sampler
-                weights_for_rows_sampler = (
-                    decoded_idx_df[ticker_id_col_for_sampler]
-                    .map(weights_map_sampler)
-                    .fillna(1.0)
-                )
-
-                if (weights_for_rows_sampler.values <= 0).any():
-                    print(
-                        "Warning: Some calculated weights for sampler are non-positive. Clamping to a small positive value."
-                    )
-                    weights_for_rows_sampler.values[
-                        weights_for_rows_sampler.values <= 0
-                    ] = 1e-6
-
-                if len(weights_for_rows_sampler) == len(timeseries_dataset):
-                    sampler = torch.utils.data.WeightedRandomSampler(
-                        weights=weights_for_rows_sampler.values,
-                        num_samples=len(weights_for_rows_sampler),
-                        replacement=True,
-                    )
-
-                    num_cpu = os.cpu_count()
-                    train_loader = timeseries_dataset.to_dataloader(
-                        train=True,
-                        batch_size=cfg.trainer.batch_size,
-                        sampler=sampler,
-                        num_workers=(
-                            min(num_cpu - 2, cfg.trainer.num_workers)
-                            if num_cpu and num_cpu > 2
-                            else cfg.trainer.num_workers
-                        ),
-                        shuffle=False,
-                        pin_memory=True,
-                        persistent_workers=(
-                            True if cfg.trainer.num_workers > 0 else False
-                        ),
-                        prefetch_factor=4,  # default is 2 – double it
-                    )
-                    train_loader_created_with_sampler = True
-                    print(
-                        f"Train Dataloader created with WeightedRandomSampler for '{ticker_id_col_for_sampler}'."
-                    )
-                else:
-                    print(
-                        f"Warning: Length of weights ({len(weights_for_rows_sampler)}) does not match dataset length ({len(timeseries_dataset)}). "
-                        "Sampler not used."
-                    )
-            else:
-                print(
-                    f"Warning: Value counts for '{ticker_id_col_for_sampler}' in decoded_index_df is empty. Sampler not used."
-                )
-        else:
-            print(
-                f"Critical: Ticker ID column '{ticker_id_col_for_sampler}' not in TimeSeriesDataSet's decoded_index. Sampler not used."
-            )
-
-    if not train_loader_created_with_sampler:
-        print(
-            f"Warning: Balanced sampler for column '{ticker_id_col_for_sampler}' could not be set up. Using default shuffling for train_loader."
-        )
-        train_loader = timeseries_dataset.to_dataloader(
-            train=True,
-            batch_size=cfg.trainer.batch_size,
-            num_workers=cfg.trainer.num_workers,
-            shuffle=True,
-        )
-
-    val_loader = timeseries_dataset.to_dataloader(
+    val_loader = validation_dataset.to_dataloader(
         train=False,
         batch_size=cfg.trainer.batch_size * 2,
         num_workers=cfg.trainer.num_workers,
         shuffle=False,
+        drop_last=False,
     )
 
     early_stop_callback = EarlyStopping(
@@ -558,28 +444,22 @@ def main(cfg: DictConfig) -> None:
     lr_monitor = LearningRateMonitor(
         logging_interval=cfg.trainer.lr_monitor_logging_interval
     )
-
     checkpoint_callback = ModelCheckpoint(
-        dirpath=None,  # If None, PTL saves to its default logger path (e.g., lightning_logs/version_X/checkpoints)
-        # You can specify a path like "my_checkpoints/"
-        filename="{epoch}-{val_loss:.2f}-best",  # Example filename
-        monitor="val_loss",  # Metric to monitor
-        mode="min",  # "min" for loss, "max" for accuracy
-        save_top_k=1,  # Save only the best model
-        save_last=True,  # Also save the last model at the end of training
+        dirpath=None,
+        filename="{epoch}-{val_loss:.2f}-best",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
         verbose=True,
     )
-
     callbacks = [early_stop_callback, lr_monitor, checkpoint_callback]
 
     logger = None
     if cfg.trainer.get("use_wandb", False):
         from pytorch_lightning.loggers import WandbLogger
 
-        project_name_wandb = str(cfg.get("project_name", "default_project"))
-        exp_id_wandb = str(cfg.get("experiment_id", "default_exp"))
-        run_name_wandb = f"{project_name_wandb}_{exp_id_wandb}"
-
+        run_name_wandb = f"{cfg.project_name}_{cfg.experiment_id}"
         logger = WandbLogger(
             name=run_name_wandb,
             project=cfg.trainer.wandb_project_name,
@@ -588,23 +468,15 @@ def main(cfg: DictConfig) -> None:
             save_dir=str(Path(cfg.paths.log_dir) / "wandb"),
         )
         print("WandB Logger initialized.")
-
-        # --- REVISED: COPY HYDRA CONFIG TO WANDB RUN DIRECTORY ---
-        # Use logger.log_dir which is the specific directory for this run.
-        # This is the same directory ModelCheckpoint uses.
         if logger.log_dir:
             wandb_run_dir = Path(logger.log_dir)
             hydra_cfg_path = Path(HydraConfig.get().runtime.output_dir) / ".hydra"
             target_hydra_path = wandb_run_dir / ".hydra"
-
             print(
                 f"Copying Hydra config from {hydra_cfg_path} to {target_hydra_path}..."
             )
             try:
                 if target_hydra_path.exists():
-                    print(
-                        f".hydra directory already exists at {target_hydra_path}. Overwriting."
-                    )
                     shutil.rmtree(target_hydra_path)
                 shutil.copytree(hydra_cfg_path, target_hydra_path)
                 print("Successfully copied .hydra config directory.")
@@ -612,10 +484,8 @@ def main(cfg: DictConfig) -> None:
                 print(f"Error copying .hydra directory: {e}")
         else:
             print("Warning: Could not determine logger.log_dir. Skipping config copy.")
-        # --- END OF REVISED LOGIC ---
-
     else:
-        print("WandB Logger is disabled (use_wandb=false or key missing).")
+        print("WandB Logger is disabled.")
 
     trainer = pl.Trainer(
         max_epochs=cfg.trainer.max_epochs,
@@ -628,7 +498,7 @@ def main(cfg: DictConfig) -> None:
         callbacks=callbacks,
         logger=logger,
         gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.1),
-        num_sanity_val_steps=0,  # ← skip the initial sanity‐check validation
+        num_sanity_val_steps=0,
     )
 
     print("Trainer initialized. Starting training...")

@@ -12,54 +12,51 @@ min_prediction_horizon: 1 # For pytorch-forecasting, prediction length is max_pr
 batch_size: 64
 num_workers: 4 # For DataLoader
 
-# Feature definitions (must match columns in processed_data.parquet)
-# These lists will be used by TimeSeriesDataSet and our model
-group_ids: ["ticker_id"] # Column name for grouping time series
-time_idx: "time_idx"     # Column name for time index
+# Core structural parameters
+group_ids:
+  - "ticker_id"
+time_idx: "time_idx"
+target:
+  - "target_1d"
+  - "target_5d"
+  - "target_20d"
+target_quantiles: [0.05, 0.5, 0.95]
 
-target: ["target_1d", "target_5d", "target_20d"] # Our multiple targets
-target_quantiles: [0.05, 0.5, 0.95] # For quantile regression
+# --- Feature Configuration ---
 
-static_categoricals: ["ticker_id", "sector_id"]
-static_reals: [] # e.g., "avg_market_cap_log" if we had one
+# Static (per-ticker) features
+static_categoricals:
+  - "ticker_id"
+  - "sector_id"
+static_reals: []
 
-# For TFT, known/unknown refers to whether they are known for the decoder part
-time_varying_known_categoricals: [] # e.g., "event_type" if we had future known events
-time_varying_known_reals: [
-    "day_of_week",
-    "day_of_month",
-    "month",
-    "is_quarter_end",
-    "time_idx" # Often good to include time_idx here
-    ]
+# Time-varying features that are known in the future (e.g., calendar features)
+time_varying_known_categoricals: []
+time_varying_known_reals:
+  - "day_of_week"
+  - "day_of_month"
+  - "month"
+  - "is_quarter_end"
+  # 'time_idx' REMOVED FROM THIS LIST. It is not a feature.
+  # The model gets time information from the 'add_relative_time_idx=True' setting in TimeSeriesDataSet.
 
+# Time-varying features that are only known in the past (e.g., price-derived features)
 time_varying_unknown_categoricals: []
-time_varying_unknown_reals: [
-    "log_return_1d",
-    "log_return_5d",
-    "log_return_20d",
-    "volume_zscore_20d",
-    "volatility_20d",
-    "rsi_14d",
-    "macd",
-    "is_missing" # The mask feature we created
-    # We are not including 'close' or 'open' directly here as TFT works well with returns/changes.
-    # If you want to use raw prices, they would go here too.
-    # But then appropriate scaling (e.g. GroupNormalizer) is crucial.
-    ]
+time_varying_unknown_reals:
+  - "log_return_1d"
+  - "log_return_5d"
+  - "log_return_20d"
+  - "volume_zscore_20d"
+  - "volatility_20d"
+  - "rsi_14d"
+  - "macd"
+  - "is_missing" # 'is_missing' flag can be a feature
 
-# Normalization for continuous variables (example, specific to features)
-# pytorch-forecasting TimeSeriesDataSet can take a dictionary of scalers
-# e.g., GroupNormalizer for unknown reals, StandardScaler for known_reals
+# --- Normalizer Configuration ---
 scalers:
-  # Example:
-  # log_return_1d: "GroupNormalizer"
-  # volume_zscore_20d: "StandardScaler"
-  # For now, let TimeSeriesDataSet use its defaults or we can specify them later.
-  # Default is StandardScaler for reals, GroupNormalizer for targets if groups are present.
-  default_reals_normalizer: "StandardScaler" # e.g. StandardScaler, GroupNormalizer, RobustScaler
-  # For targets, GroupNormalizer is often good. It normalizes each series by its own mean/std.
-  # target_normalizer can also be a list if targets require different normalizers.
-  # For multiple targets like ours, it might be a single normalizer or a dict.
-  # Pytorch-forecasting will apply it to each target if it's a single normalizer.
+  # StandardScaler is a reasonable default for many feature types.
+  default_reals_normalizer: "StandardScaler"
+
+  # GroupNormalizer is best for targets like returns, as it normalizes
+  # each stock's returns relative to its own history.
   target_normalizer: "GroupNormalizer"

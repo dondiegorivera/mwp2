@@ -395,12 +395,8 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # 2. Observed-past features
     log_return_1d_base_expr = log_close - log_close.shift(1)
 
-    rolling_volume_mean = (
-        pl.col("volume").rolling_mean(window_size=20, min_samples=10).over("ticker_id")
-    )
-    rolling_volume_std = (
-        pl.col("volume").rolling_std(window_size=20, min_samples=10).over("ticker_id")
-    )
+    rolling_volume_mean = pl.col("volume").rolling_mean(window_size=20, min_samples=10)
+    rolling_volume_std = pl.col("volume").rolling_std(window_size=20, min_samples=10)
 
     volume_zscore_expr = (
         pl.when(rolling_volume_std > 1e-6)
@@ -408,19 +404,40 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(0.0)
     )
 
+    # --- CORRECTED: Moved `.over()` outside the `pl.when()` clause ---
+    is_missing_mask = pl.col("is_missing").cast(pl.Boolean)
+
     df = df.with_columns(
-        log_return_1d=log_return_1d_base_expr.over("ticker_id"),
-        log_return_5d=(log_close - log_close.shift(5)).over("ticker_id"),
-        log_return_20d=(log_close - log_close.shift(20)).over("ticker_id"),
-        volume_zscore_20d=volume_zscore_expr.alias("volume_zscore_20d"),
-        volatility_20d=log_return_1d_base_expr.rolling_std(
-            window_size=20, min_samples=10
-        ).over("ticker_id"),
-        skew_20d=log_return_1d_base_expr.rolling_skew(window_size=20).over("ticker_id"),
-        kurtosis_20d=log_return_1d_base_expr.rolling_kurtosis(window_size=20).over(
+        log_return_1d=(pl.when(~is_missing_mask).then(log_return_1d_base_expr)).over(
             "ticker_id"
         ),
-        price_change=safe_close.diff(1).over("ticker_id"),
+        log_return_5d=(
+            pl.when(~is_missing_mask).then(log_close - log_close.shift(5))
+        ).over("ticker_id"),
+        log_return_20d=(
+            pl.when(~is_missing_mask).then(log_close - log_close.shift(20))
+        ).over("ticker_id"),
+        volume_zscore_20d=(pl.when(~is_missing_mask).then(volume_zscore_expr)).over(
+            "ticker_id"
+        ),
+        volatility_20d=(
+            pl.when(~is_missing_mask).then(
+                log_return_1d_base_expr.rolling_std(window_size=20, min_samples=10)
+            )
+        ).over("ticker_id"),
+        skew_20d=(
+            pl.when(~is_missing_mask).then(
+                log_return_1d_base_expr.rolling_skew(window_size=20)
+            )
+        ).over("ticker_id"),
+        kurtosis_20d=(
+            pl.when(~is_missing_mask).then(
+                log_return_1d_base_expr.rolling_kurtosis(window_size=20)
+            )
+        ).over("ticker_id"),
+        price_change=(pl.when(~is_missing_mask).then(safe_close.diff(1))).over(
+            "ticker_id"
+        ),
     )
 
     # RSI calculation
@@ -435,16 +452,12 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         .alias("loss"),
     )
 
-    avg_gain_expr = (
-        pl.col("gain").ewm_mean(alpha=1 / 14, min_samples=10).over("ticker_id")
-    )
-    avg_loss_expr = (
-        pl.col("loss").ewm_mean(alpha=1 / 14, min_samples=10).over("ticker_id")
-    )
+    avg_gain_expr = pl.col("gain").ewm_mean(alpha=1 / 14, min_samples=10)
+    avg_loss_expr = pl.col("loss").ewm_mean(alpha=1 / 14, min_samples=10)
 
     df = df.with_columns(
-        avg_gain=avg_gain_expr,
-        avg_loss=avg_loss_expr,
+        avg_gain=avg_gain_expr.over("ticker_id"),
+        avg_loss=avg_loss_expr.over("ticker_id"),
     )
 
     rs_expr = (
@@ -453,26 +466,38 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.when(pl.col("avg_gain") > 1e-6).then(100.0).otherwise(1.0))
     )
 
-    df = df.with_columns(rsi_14d=(100.0 - (100.0 / (1.0 + rs_expr))).alias("rsi_14d"))
+    df = df.with_columns(
+        rsi_14d=(
+            pl.when(~is_missing_mask).then(100.0 - (100.0 / (1.0 + rs_expr)))
+        ).alias("rsi_14d")
+    )
 
     # MACD
     ema_12_expr = safe_close.ewm_mean(
         span=12, min_samples=12 - 1 if (12 - 1) > 0 else 1
-    ).over("ticker_id")
+    )
     ema_26_expr = safe_close.ewm_mean(
         span=26, min_samples=26 - 1 if (26 - 1) > 0 else 1
-    ).over("ticker_id")
+    )
 
-    df = df.with_columns(macd_base=(ema_12_expr - ema_26_expr))
-
+    # CORRECTED: Apply the when/then logic within the `.over()` context
     df = df.with_columns(
-        macd_signal_base=(
-            pl.col("macd_base")
-            .ewm_mean(span=9, min_samples=9 - 1 if (9 - 1) > 0 else 1)
-            .over("ticker_id")
+        macd_base=(pl.when(~is_missing_mask).then(ema_12_expr - ema_26_expr)).over(
+            "ticker_id"
         )
     )
+
+    macd_signal_expr = pl.col("macd_base").ewm_mean(
+        span=9, min_samples=9 - 1 if (9 - 1) > 0 else 1
+    )
+    df = df.with_columns(
+        macd_signal_base=(pl.when(~is_missing_mask).then(macd_signal_expr)).over(
+            "ticker_id"
+        )
+    )
+
     df = df.rename({"macd_base": "macd", "macd_signal_base": "macd_signal"})
+    # --- END CORRECTION ---
 
     # --- Final Cleanup ---
 
