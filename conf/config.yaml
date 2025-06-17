@@ -20,6 +20,6 @@ paths:
   # sector_map_file: "${paths.data_dir}/processed/sector_map.parquet" # Might be needed for num_sectors
 
 evaluate:
-  batch_size: 256
-  num_workers: 4
+  batch_size: 4096
+  num_workers: 8
   sample_tickers: ["AAPL", "MSFT", "GE"]  # For visualization

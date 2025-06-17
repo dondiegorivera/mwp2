@@ -305,7 +305,7 @@ def main(cfg: DictConfig) -> None:
         for col in reals_to_scale:
             if default_normalizer_name == "GroupNormalizer":
                 scalers[col] = GroupNormalizer(
-                    groups=group_ids_list, method="robust", transformation="softplus"
+                    groups=group_ids_list, method="standard"
                 )
             elif default_normalizer_name == "EncoderNormalizer":
                 scalers[col] = EncoderNormalizer()
@@ -324,7 +324,7 @@ def main(cfg: DictConfig) -> None:
         )
         for col in reals_to_scale:
             scalers[str(col)] = GroupNormalizer(
-                groups=group_ids_list, method="robust", transformation="softplus"
+                groups=group_ids_list, method="standard"
             )
 
     single_target_normalizer_prototype_name = OmegaConf.select(
@@ -339,8 +339,7 @@ def main(cfg: DictConfig) -> None:
                     normalizers_list.append(
                         GroupNormalizer(
                             groups=group_ids_list,
-                            method="robust",
-                            transformation="softplus",
+                            method="standard",
                         )
                     )
                 elif single_target_normalizer_prototype_name == "EncoderNormalizer":
@@ -352,7 +351,7 @@ def main(cfg: DictConfig) -> None:
         elif target_list:
             if single_target_normalizer_prototype_name == "GroupNormalizer":
                 final_target_normalizer = GroupNormalizer(
-                    groups=group_ids_list, method="robust", transformation="softplus"
+                    groups=group_ids_list, method="standard"
                 )
             elif single_target_normalizer_prototype_name == "EncoderNormalizer":
                 final_target_normalizer = EncoderNormalizer()

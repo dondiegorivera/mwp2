@@ -1,6 +1,7 @@
 # src/market_prediction_workbench/evaluate.py
 import json
 import sys
+import inspect
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
@@ -60,6 +61,81 @@ def _move_to_device(obj, device):
     return obj
 
 
+# evaluate.py
+# -----------------------------------------------------------------------
+# REPLACE the whole inverse_transform_with_groups(...) helper with this
+# -----------------------------------------------------------------------
+from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
+
+# evaluate.py  – replace _inverse_with_groups with this version
+# evaluate.py  ------------------------------------------------------------
+import inspect
+import torch
+from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
+
+def _inverse_with_groups(data: torch.Tensor,
+                         normalizer,
+                         groups: torch.Tensor) -> torch.Tensor:
+    """
+    Robust inverse transform that works on every PF version:
+       • GroupNormalizer        (any transformation / any release)
+       • MultiNormalizer        (recursion)
+       • Other normalisers      (delegate)
+    """
+    # ------------------------------------------------------------------ #
+    # 1) GroupNormalizer                                                #
+    # ------------------------------------------------------------------ #
+    if isinstance(normalizer, GroupNormalizer):
+        # figure out which keyword, if any, the current build understands
+        sig = inspect.signature(normalizer.inverse_transform)
+        if   "group_ids"    in sig.parameters: kw = "group_ids"
+        elif "groups"       in sig.parameters: kw = "groups"
+        elif "target_scale" in sig.parameters: kw = "target_scale"
+        elif "scale"        in sig.parameters: kw = "scale"
+        else:                                 kw = None   # positional only
+
+        # obtain µ (location) and σ (scale) for every sample in the batch
+        g = groups[:, 0].cpu().numpy()                    # [B]
+        scale = torch.as_tensor(
+            normalizer.get_parameters(g),                 # [B, 2] (loc, scale)
+            dtype=data.dtype,
+            device=data.device,
+        )
+
+        # try the built-in inverse first …
+        try:
+            if kw is None:
+                return normalizer.inverse_transform(data, scale)
+            else:
+                return normalizer.inverse_transform(data, **{kw: scale})
+
+        # … fall back to manual µ+σ·ŷ when NotImplementedError is raised
+        except NotImplementedError:
+            loc  = scale[:, 0]
+            sigm = scale[:, 1]
+            while loc.dim()  < data.dim(): loc  = loc.unsqueeze(1)
+            while sigm.dim() < data.dim(): sigm = sigm.unsqueeze(1)
+            return data * sigm + loc
+
+    # ------------------------------------------------------------------ #
+    # 2) MultiNormalizer                                                 #
+    # ------------------------------------------------------------------ #
+    if isinstance(normalizer, MultiNormalizer):
+        parts = [
+            _inverse_with_groups(data[..., i], sub, groups)
+            for i, sub in enumerate(normalizer.normalizers)
+        ]
+        return torch.stack(parts, dim=-1)
+
+    # ------------------------------------------------------------------ #
+    # 3) Anything else                                                   #
+    # ------------------------------------------------------------------ #
+    out = normalizer.inverse_transform(data)
+    return torch.as_tensor(out, dtype=data.dtype, device=data.device)
+
+
+
+
 def inverse_transform_with_groups(
     data: torch.Tensor, normalizer, groups: torch.Tensor
 ) -> torch.Tensor:
@@ -74,8 +150,7 @@ def inverse_transform_with_groups(
         group_ids = groups[:, 0].cpu().numpy()
         params = normalizer.get_parameters(group_ids)
         mus = torch.from_numpy(params[:, 0]).unsqueeze(1).to(data.device)
-        sigs = torch.from_numpy(params[:, 1]).unsqueeze(1).to(data.device)
-        return (data * sigs + 1) * mus
+        return (data + 1) * mus           
 
     # Handle MultiNormalizer
     if isinstance(normalizer, MultiNormalizer):
@@ -182,7 +257,7 @@ def run_inference(
 
             # Handle GroupNormalizer specifically
             if isinstance(norm, GroupNormalizer):
-                decoded = inverse_transform_with_groups(pred_data, norm, groups)
+                decoded = _inverse_with_groups(pred_data, norm, groups)
             else:
                 decoded = norm.inverse_transform(pred_data)
                 if not isinstance(decoded, torch.Tensor):
@@ -196,7 +271,7 @@ def run_inference(
     preds_dec = torch.stack(preds_dec, dim=2)
 
     # Inverse-transform true values
-    trues_dec = inverse_transform_with_groups(trues_norm, normalizer, groups)
+    trues_dec = _inverse_with_groups(trues_norm, normalizer, groups)
 
     # Extract first horizon predictions
     preds_h1 = preds_dec[:, 0]  # [B, T, Q]
@@ -321,7 +396,7 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_name
 def save_output(metrics: Dict, preds: Dict, trues: Dict, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "metrics.json").open("w") as fp:
-        json.dump(metrics, fp, indent=2)
+        json.dump({k: float(v) for k, v in metrics.items()}, fp, indent=2)
 
     pd.DataFrame({**trues, **preds}).to_csv(out_dir / "predictions.csv", index=False)
     print(f"\nResults written to {out_dir}")
