@@ -304,9 +304,7 @@ def main(cfg: DictConfig) -> None:
         )
         for col in reals_to_scale:
             if default_normalizer_name == "GroupNormalizer":
-                scalers[col] = GroupNormalizer(
-                    groups=group_ids_list, method="standard"
-                )
+                scalers[col] = GroupNormalizer(groups=group_ids_list, method="standard")
             elif default_normalizer_name == "EncoderNormalizer":
                 scalers[col] = EncoderNormalizer()
             elif default_normalizer_name == "StandardScaler":

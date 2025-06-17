@@ -65,17 +65,14 @@ def _move_to_device(obj, device):
 # -----------------------------------------------------------------------
 # REPLACE the whole inverse_transform_with_groups(...) helper with this
 # -----------------------------------------------------------------------
-from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
 
 # evaluate.py  – replace _inverse_with_groups with this version
 # evaluate.py  ------------------------------------------------------------
-import inspect
-import torch
-from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
 
-def _inverse_with_groups(data: torch.Tensor,
-                         normalizer,
-                         groups: torch.Tensor) -> torch.Tensor:
+
+def _inverse_with_groups(
+    data: torch.Tensor, normalizer, groups: torch.Tensor
+) -> torch.Tensor:
     """
     Robust inverse transform that works on every PF version:
        • GroupNormalizer        (any transformation / any release)
@@ -88,16 +85,21 @@ def _inverse_with_groups(data: torch.Tensor,
     if isinstance(normalizer, GroupNormalizer):
         # figure out which keyword, if any, the current build understands
         sig = inspect.signature(normalizer.inverse_transform)
-        if   "group_ids"    in sig.parameters: kw = "group_ids"
-        elif "groups"       in sig.parameters: kw = "groups"
-        elif "target_scale" in sig.parameters: kw = "target_scale"
-        elif "scale"        in sig.parameters: kw = "scale"
-        else:                                 kw = None   # positional only
+        if "group_ids" in sig.parameters:
+            kw = "group_ids"
+        elif "groups" in sig.parameters:
+            kw = "groups"
+        elif "target_scale" in sig.parameters:
+            kw = "target_scale"
+        elif "scale" in sig.parameters:
+            kw = "scale"
+        else:
+            kw = None  # positional only
 
         # obtain µ (location) and σ (scale) for every sample in the batch
-        g = groups[:, 0].cpu().numpy()                    # [B]
+        g = groups[:, 0].cpu().numpy()  # [B]
         scale = torch.as_tensor(
-            normalizer.get_parameters(g),                 # [B, 2] (loc, scale)
+            normalizer.get_parameters(g),  # [B, 2] (loc, scale)
             dtype=data.dtype,
             device=data.device,
         )
@@ -111,10 +113,12 @@ def _inverse_with_groups(data: torch.Tensor,
 
         # … fall back to manual µ+σ·ŷ when NotImplementedError is raised
         except NotImplementedError:
-            loc  = scale[:, 0]
+            loc = scale[:, 0]
             sigm = scale[:, 1]
-            while loc.dim()  < data.dim(): loc  = loc.unsqueeze(1)
-            while sigm.dim() < data.dim(): sigm = sigm.unsqueeze(1)
+            while loc.dim() < data.dim():
+                loc = loc.unsqueeze(1)
+            while sigm.dim() < data.dim():
+                sigm = sigm.unsqueeze(1)
             return data * sigm + loc
 
     # ------------------------------------------------------------------ #
@@ -134,8 +138,6 @@ def _inverse_with_groups(data: torch.Tensor,
     return torch.as_tensor(out, dtype=data.dtype, device=data.device)
 
 
-
-
 def inverse_transform_with_groups(
     data: torch.Tensor, normalizer, groups: torch.Tensor
 ) -> torch.Tensor:
@@ -150,7 +152,7 @@ def inverse_transform_with_groups(
         group_ids = groups[:, 0].cpu().numpy()
         params = normalizer.get_parameters(group_ids)
         mus = torch.from_numpy(params[:, 0]).unsqueeze(1).to(data.device)
-        return (data + 1) * mus           
+        return (data + 1) * mus
 
     # Handle MultiNormalizer
     if isinstance(normalizer, MultiNormalizer):
