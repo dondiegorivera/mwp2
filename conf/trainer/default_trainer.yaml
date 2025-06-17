@@ -1,7 +1,7 @@
 # conf/trainer/default_trainer.yaml
 epochs: 10 # Default number of epochs
-batch_size: 512 # Default batch size for training
-num_workers: 16 # Default num_workers for DataLoaders, adjust based on system
+batch_size: 4096 # Default batch size for training
+num_workers: 8 # Default num_workers for DataLoaders, adjust based on system
 # patience_for_early_stopping: 5
 
 # PyTorch Lightning Trainer arguments
@@ -20,7 +20,7 @@ early_stopping_mode: "min"
 lr_monitor_logging_interval: "epoch"
 
 # gradient clipping to prevent explosions:
-gradient_clip_val: 0.5
+gradient_clip_val: 1.0
 
 # WandB Logger (optional)
 use_wandb: true # <--- CHANGE THIS TO true

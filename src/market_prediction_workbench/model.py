@@ -96,7 +96,7 @@ class GlobalTFT(pl.LightningModule):
         quantiles = (
             loss_instance.quantiles if hasattr(loss_instance, "quantiles") else [0.5]
         )
-        output_size = num_targets * len(quantiles)
+        output_size = len(quantiles)
         if "output_size" not in model_specific_params:
             model_specific_params["output_size"] = output_size
 
@@ -242,7 +242,10 @@ class GlobalTFT(pl.LightningModule):
     def _prepare_target_tensor(self, raw_target_data):
         target = self._process_input_data(raw_target_data)
 
-        # FIX: Ensure proper dimensions for multi-target
+        # This was part of the original file and needs to be adapted for lists
+        if isinstance(target, list):
+            return [t.unsqueeze(1) if t.ndim == 1 else t for t in target]
+
         if target.ndim == 2:
             target = target.unsqueeze(1)  # Add time dimension
         return target
@@ -262,13 +265,28 @@ class GlobalTFT(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         out = self(x)
+        target, _ = y  # y is a tuple of (target, scale)
 
-        # FIX: Properly handle multi-target format
-        target = self._prepare_target_tensor(y[0])
-        target = target.unsqueeze(-1)  # Add channel dimension
+        # --- THE CORRECT FIX for both AttributeError and IndexError ---
+        # The loss function expects a time dimension for each target.
+        # Since max_prediction_horizon=1, targets from the dataloader are 1D.
+        # We must add a time dimension of size 1.
+        if isinstance(target, list):
+            # If multi-target, reshape each tensor in the list.
+            # Shape changes from [(B,), (B,), ...] to [(B, 1), (B, 1), ...]
+            reshaped_target = [t.unsqueeze(1) for t in target]
+        else:
+            # If single-target, reshape the single tensor.
+            # Shape changes from (B,) to (B, 1)
+            reshaped_target = target.unsqueeze(1)
+        # --- END FIX ---
 
-        loss_val = self.model.loss(out.prediction, target)
-        bs = target.size(0)  # ← exact batch size
+        loss_val = self.model.loss(out.prediction, reshaped_target)
+        bs = (
+            reshaped_target[0].size(0)
+            if isinstance(reshaped_target, list)
+            else reshaped_target.size(0)
+        )
         self.log(
             "train_loss",
             loss_val,
@@ -276,18 +294,22 @@ class GlobalTFT(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             batch_size=bs,
-        )  # ← no more warning
+        )
         return loss_val
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         out = self(x)
+        target, _ = y
 
-        # FIX: Same as training step
-        target = self._prepare_target_tensor(y[0])
-        target = target.unsqueeze(-1)  # Add channel dimension
+        # --- THE CORRECT FIX (Applied to validation as well) ---
+        if isinstance(target, list):
+            reshaped_target = [t.unsqueeze(1) for t in target]
+        else:
+            reshaped_target = target.unsqueeze(1)
+        # --- END FIX ---
 
-        loss_val = self.model.loss(out.prediction, target)
+        loss_val = self.model.loss(out.prediction, reshaped_target)
         self.log("val_loss", loss_val)
         return loss_val
 
@@ -296,13 +318,12 @@ class GlobalTFT(pl.LightningModule):
             self.parameters(),
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
-            fused=True,
+            fused=True if torch.cuda.is_available() else False,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             patience=3,
             factor=0.5,
-            # verbose=True  # REMOVED THIS LINE
         )
         return {
             "optimizer": optimizer,

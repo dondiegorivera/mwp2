@@ -1,12 +1,9 @@
 # src/market_prediction_workbench/evaluate.py
-# -----------------------------------------------------------------------------#
-# Evaluate a trained GlobalTFT checkpoint – robust against many edge-cases      #
-# -----------------------------------------------------------------------------#
-
 import json
 import sys
+import inspect
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import hydra
 import matplotlib.pyplot as plt
@@ -16,10 +13,12 @@ import polars as pl
 import torch
 from omegaconf import DictConfig, OmegaConf, ListConfig
 from pytorch_forecasting import TimeSeriesDataSet
+from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from market_prediction_workbench.model import GlobalTFT
+
 
 # -----------------------------------------------------------------------------#
 # Helpers                                                                       #
@@ -62,6 +61,122 @@ def _move_to_device(obj, device):
     return obj
 
 
+# evaluate.py
+# -----------------------------------------------------------------------
+# REPLACE the whole inverse_transform_with_groups(...) helper with this
+# -----------------------------------------------------------------------
+
+# evaluate.py  – replace _inverse_with_groups with this version
+# evaluate.py  ------------------------------------------------------------
+
+
+def _inverse_with_groups(
+    data: torch.Tensor, normalizer, groups: torch.Tensor
+) -> torch.Tensor:
+    """
+    Robust inverse transform that works on every PF version:
+       • GroupNormalizer        (any transformation / any release)
+       • MultiNormalizer        (recursion)
+       • Other normalisers      (delegate)
+    """
+    # ------------------------------------------------------------------ #
+    # 1) GroupNormalizer                                                #
+    # ------------------------------------------------------------------ #
+    if isinstance(normalizer, GroupNormalizer):
+        # figure out which keyword, if any, the current build understands
+        sig = inspect.signature(normalizer.inverse_transform)
+        if "group_ids" in sig.parameters:
+            kw = "group_ids"
+        elif "groups" in sig.parameters:
+            kw = "groups"
+        elif "target_scale" in sig.parameters:
+            kw = "target_scale"
+        elif "scale" in sig.parameters:
+            kw = "scale"
+        else:
+            kw = None  # positional only
+
+        # obtain µ (location) and σ (scale) for every sample in the batch
+        g = groups[:, 0].cpu().numpy()  # [B]
+        scale = torch.as_tensor(
+            normalizer.get_parameters(g),  # [B, 2] (loc, scale)
+            dtype=data.dtype,
+            device=data.device,
+        )
+
+        # try the built-in inverse first …
+        try:
+            if kw is None:
+                return normalizer.inverse_transform(data, scale)
+            else:
+                return normalizer.inverse_transform(data, **{kw: scale})
+
+        # … fall back to manual µ+σ·ŷ when NotImplementedError is raised
+        except NotImplementedError:
+            loc = scale[:, 0]
+            sigm = scale[:, 1]
+            while loc.dim() < data.dim():
+                loc = loc.unsqueeze(1)
+            while sigm.dim() < data.dim():
+                sigm = sigm.unsqueeze(1)
+            return data * sigm + loc
+
+    # ------------------------------------------------------------------ #
+    # 2) MultiNormalizer                                                 #
+    # ------------------------------------------------------------------ #
+    if isinstance(normalizer, MultiNormalizer):
+        parts = [
+            _inverse_with_groups(data[..., i], sub, groups)
+            for i, sub in enumerate(normalizer.normalizers)
+        ]
+        return torch.stack(parts, dim=-1)
+
+    # ------------------------------------------------------------------ #
+    # 3) Anything else                                                   #
+    # ------------------------------------------------------------------ #
+    out = normalizer.inverse_transform(data)
+    return torch.as_tensor(out, dtype=data.dtype, device=data.device)
+
+
+def inverse_transform_with_groups(
+    data: torch.Tensor, normalizer, groups: torch.Tensor
+) -> torch.Tensor:
+    """
+    Inverse-transform a tensor normalized by:
+      - GroupNormalizer  => manually invert using get_parameters
+      - MultiNormalizer  => recurse into each sub-normalizer
+      - others           => call built-in inverse_transform
+    """
+    # Handle GroupNormalizer
+    if isinstance(normalizer, GroupNormalizer):
+        group_ids = groups[:, 0].cpu().numpy()
+        params = normalizer.get_parameters(group_ids)
+        mus = torch.from_numpy(params[:, 0]).unsqueeze(1).to(data.device)
+        return (data + 1) * mus
+
+    # Handle MultiNormalizer
+    if isinstance(normalizer, MultiNormalizer):
+        # Special case for single-element data (single target)
+        if data.dim() == 1 or (data.dim() == 2 and data.shape[1] == 1):
+            # Process first target only
+            return inverse_transform_with_groups(
+                data, normalizer.normalizers[0], groups
+            )
+
+        # Multi-target case - process each target separately
+        parts = [
+            inverse_transform_with_groups(data[..., i], subnorm, groups)
+            for i, subnorm in enumerate(normalizer.normalizers)
+        ]
+        return torch.stack(parts, dim=-1)
+
+    # Handle other normalizers
+    arr = normalizer.inverse_transform(data.cpu().numpy())
+    if not isinstance(arr, torch.Tensor):
+        arr = torch.from_numpy(arr)
+    return arr.to(data.device)
+
+
 # -----------------------------------------------------------------------------#
 # Inference                                                                    #
 # -----------------------------------------------------------------------------#
@@ -70,77 +185,148 @@ def _move_to_device(obj, device):
 def run_inference(
     model: GlobalTFT, loader: DataLoader, cfg: DictConfig, dataset: TimeSeriesDataSet
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], List[str]]:
-    """Run model on the dataloader and collect 1-step-ahead predictions."""
+    """Run model on the dataloader and collect predictions with inverse transform."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
 
-    # Get the decoder to convert model output back to original IDs
     group_id_col = _cfg_list(cfg.data.group_ids)[0]
     decoder = dataset.categorical_encoders[group_id_col]
 
-    preds_all, trues_all, tickers_all, t_idx_all = [], [], [], []
+    preds_norm_list, trues_norm_list = [], []
+    tickers_all, t_idx_all = [], []
+    groups_all = []  # Store groups for inverse transform
 
     with torch.no_grad():
         for x, y in tqdm(loader, desc="Running inference"):
             x = _move_to_device(x, device)
 
-            output = model(x).prediction
-            if isinstance(output, list):
-                output = torch.stack(output, dim=2)
+            # normalized target
+            if isinstance(y, (list, tuple)):
+                target_norm = y[0]
             else:
-                output = output.unsqueeze(2)
+                target_norm = y
 
-            target = y[0]
-            if isinstance(target, list):
-                target = torch.stack(target, dim=2)
+            # forward
+            output_norm = model(x).prediction
+            if isinstance(output_norm, list):
+                output_norm = torch.stack(output_norm, dim=2)
             else:
-                target = target.unsqueeze(2)
+                output_norm = output_norm.unsqueeze(2)
 
-            # --- THE FIX: Decode the group IDs ---
-            encoded_ids = x["groups"][:, 0].cpu().numpy()
-            # Decode from new integers (0,1,2) back to original string IDs ('30', '120')
-            string_ids = decoder.inverse_transform(encoded_ids)
-            # Convert back to original integer IDs (30, 120)
-            original_integer_ids = [int(sid) for sid in string_ids]
-            tickers_all.extend(original_integer_ids)
-            # --- END FIX ---
+            if isinstance(target_norm, list):
+                target_norm = torch.stack(target_norm, dim=2)
+            else:
+                target_norm = target_norm.unsqueeze(2)
 
-            preds_all.append(output.cpu().numpy())
-            trues_all.append(target.numpy())
+            # collect on CPU
+            preds_norm_list.append(output_norm.cpu())
+            trues_norm_list.append(target_norm.cpu())
+
+            # Store groups for later use in inverse transform
+            groups_all.append(x["groups"].cpu())
+
+            # decode tickers & times
+            encoded = x["groups"][:, 0].cpu().numpy()
+            tickers_all.extend(int(s) for s in decoder.inverse_transform(encoded))
             t_idx_all.append(x["decoder_time_idx"].cpu().numpy())
 
-    preds = np.concatenate(preds_all, 0)
-    trues = np.concatenate(trues_all, 0)
-    tickers = np.array(tickers_all)  # Convert list of IDs to numpy array
-    time_idx = np.concatenate(t_idx_all, 0)
+    # concatenate
+    preds_norm = torch.cat(preds_norm_list, dim=0)  # [B, H, T, Q]
+    trues_norm = torch.cat(trues_norm_list, dim=0)  # [B, H, T]
+    groups = torch.cat(groups_all, dim=0)  # [B, G] where G is number of group columns
+    tickers = np.array(tickers_all)
+    time_idx = np.concatenate(t_idx_all, axis=0)  # [B, H]
 
-    preds_h1 = preds[:, 0]
-    trues_h1 = trues[:, 0]
-    dec_time = time_idx[:, 0]
+    # Handle different types of normalizers
+    normalizer = dataset.target_normalizer
 
-    pred_dict, true_dict = {}, {"ticker": tickers, "time_idx": dec_time}
-    short_tgt_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
+    # Inverse-transform predictions
+    preds_dec = []
+    num_targets = preds_norm.shape[2]
 
-    for i, name in enumerate(short_tgt_names):
-        pred_dict[f"{name}_lower"] = preds_h1[:, i, 0]
-        pred_dict[f"{name}"] = preds_h1[:, i, 1]
-        pred_dict[f"{name}_upper"] = preds_h1[:, i, 2]
-        true_dict[name] = trues_h1[:, i]
+    for i in range(num_targets):
+        target_preds = []
+        for q in range(preds_norm.shape[3]):
+            pred_data = preds_norm[:, :, i, q]
 
-    return pred_dict, true_dict, short_tgt_names
+            # Get the appropriate normalizer
+            if isinstance(normalizer, MultiNormalizer) and i < len(
+                normalizer.normalizers
+            ):
+                norm = normalizer.normalizers[i]
+            else:
+                norm = normalizer
+
+            # Handle GroupNormalizer specifically
+            if isinstance(norm, GroupNormalizer):
+                decoded = _inverse_with_groups(pred_data, norm, groups)
+            else:
+                decoded = norm.inverse_transform(pred_data)
+                if not isinstance(decoded, torch.Tensor):
+                    decoded = torch.tensor(decoded)
+
+            target_preds.append(decoded)
+
+        preds_dec.append(torch.stack(target_preds, dim=-1))
+
+    # Stack targets: [B, H, T, Q]
+    preds_dec = torch.stack(preds_dec, dim=2)
+
+    # Inverse-transform true values
+    trues_dec = _inverse_with_groups(trues_norm, normalizer, groups)
+
+    # Extract first horizon predictions
+    preds_h1 = preds_dec[:, 0]  # [B, T, Q]
+    trues_h1 = trues_dec[:, 0]  # [B, T]
+
+    # Build result dictionaries
+    pred_dict, true_dict = {}, {"ticker": tickers, "time_idx": time_idx[:, 0]}
+    short_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
+
+    for i, name in enumerate(short_names):
+        pred_dict[f"{name}_lower"] = preds_h1[:, i, 0].numpy()
+        pred_dict[f"{name}"] = preds_h1[:, i, 1].numpy()
+        pred_dict[f"{name}_upper"] = preds_h1[:, i, 2].numpy()
+        true_dict[name] = trues_h1[:, i].numpy()
+
+    return pred_dict, true_dict, short_names
 
 
-def evaluate(preds: Dict, trues: Dict, short_tgt_names: List[str]) -> Dict[str, float]:
-    """MAE, PI-coverage, direction-accuracy for every horizon."""
-    out: Dict[str, float] = {}
-    for name in short_tgt_names:
-        p, t = preds[name], trues[name]
-        lo, hi = preds[f"{name}_lower"], preds[f"{name}_upper"]
+# -----------------------------------------------------------------------------#
+# Evaluation Metrics                                                           #
+# -----------------------------------------------------------------------------#
 
-        out[f"{name}_mae"] = float(np.mean(np.abs(p - t)))
-        out[f"{name}_coverage"] = float(np.mean((t >= lo) & (t <= hi)))
-        out[f"{name}_dir_accuracy"] = float(np.mean(np.sign(p) == np.sign(t)))
-    return out
+
+def evaluate(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, float]:
+    """Calculate evaluation metrics."""
+    metrics = {}
+
+    for name in short_names:
+        pred = preds[f"{name}"]  # median prediction
+        true = trues[name]
+
+        # Remove any NaN values
+        mask = ~(np.isnan(pred) | np.isnan(true))
+        pred = pred[mask]
+        true = true[mask]
+
+        if len(pred) == 0:
+            continue
+
+        # Calculate metrics
+        mae = np.mean(np.abs(pred - true))
+        rmse = np.sqrt(np.mean((pred - true) ** 2))
+
+        # Coverage: what fraction of true values fall within prediction intervals
+        lower = preds[f"{name}_lower"][mask]
+        upper = preds[f"{name}_upper"][mask]
+        coverage = np.mean((true >= lower) & (true <= upper))
+
+        metrics[f"{name}_mae"] = mae
+        metrics[f"{name}_rmse"] = rmse
+        metrics[f"{name}_coverage_90"] = coverage
+
+    return metrics
 
 
 # -----------------------------------------------------------------------------#
@@ -157,7 +343,6 @@ def _safe_ticker_id(df: pl.DataFrame, ticker: str) -> int | None:
 
 def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_names):
     out_dir.mkdir(parents=True, exist_ok=True)
-
     ticker_csv_dir = out_dir / "ticker_predictions_for_plot"
     ticker_csv_dir.mkdir(parents=True, exist_ok=True)
 
@@ -213,7 +398,7 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_name
 def save_output(metrics: Dict, preds: Dict, trues: Dict, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "metrics.json").open("w") as fp:
-        json.dump(metrics, fp, indent=2)
+        json.dump({k: float(v) for k, v in metrics.items()}, fp, indent=2)
 
     pd.DataFrame({**trues, **preds}).to_csv(out_dir / "predictions.csv", index=False)
     print(f"\nResults written to {out_dir}")
@@ -258,7 +443,7 @@ def main(cfg: DictConfig):
     ds_params = cp["hyper_parameters"]["timeseries_dataset_params"]
 
     time_idx_col = ds_params["time_idx"]
-    df_full[time_idx_col] = df_full[time_idx_col].astype(np.int64)
+    df_full[time_idx_col] = df_full[time_idx_col].astype(int)
 
     all_cat_cols = (
         ds_params.get("static_categoricals", [])
@@ -268,7 +453,7 @@ def main(cfg: DictConfig):
     for col in all_cat_cols:
         if col in df_full.columns:
             df_full[col] = df_full[col].astype(str)
-    print(f"Ensured '{time_idx_col}' is int64 and categorical columns are strings.")
+    print(f"Ensured '{time_idx_col}' is int and categoricals are strings.")
 
     full_dataset = TimeSeriesDataSet.from_parameters(ds_params, df_full, predict=False)
     print(f"Recreated full dataset with {len(full_dataset)} samples.")
@@ -293,11 +478,9 @@ def main(cfg: DictConfig):
         sys.exit("ticker_map.parquet not found. Cannot filter by ticker name.")
 
     filtered_map = ticker_map.filter(pl.col("ticker").is_in(tickers_to_evaluate))
-
     ticker_ids_to_evaluate_str = [
         str(i) for i in filtered_map.select("ticker_id").to_series().to_list()
     ]
-
     if not ticker_ids_to_evaluate_str:
         sys.exit(f"Could not find any of {tickers_to_evaluate} in the ticker_map.")
 
@@ -308,30 +491,22 @@ def main(cfg: DictConfig):
         f"Filtered dataset to {len(eval_dataset)} samples for tickers: {tickers_to_evaluate}"
     )
 
-    if len(eval_dataset) == 0:
-        sys.exit(
-            "Filtering resulted in an empty dataset. Check ticker names and data content."
-        )
-
     loader = eval_dataset.to_dataloader(
-        train=True,
+        train=False,
         batch_size=cfg.evaluate.batch_size,
         shuffle=False,
         num_workers=cfg.evaluate.num_workers,
     )
     print("Created dataloader for evaluation.")
 
-    # Pass the dataset object to run_inference so it can decode the IDs
     preds, trues, short_tgt_names = run_inference(model, loader, run_cfg, full_dataset)
-
     metrics = evaluate(preds, trues, short_tgt_names)
 
     print("\n--- Metrics for evaluated tickers ---")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
 
-    out_dir = Path(log_dir) / "evaluation" / latest_run.name
-
+    out_dir = Path(cfg.paths.log_dir) / "evaluation" / latest_run.name
     plot_preds(
         preds,
         trues,
@@ -340,7 +515,6 @@ def main(cfg: DictConfig):
         tickers_to_evaluate,
         short_tgt_names,
     )
-
     save_output(metrics, preds, trues, out_dir)
 
 
