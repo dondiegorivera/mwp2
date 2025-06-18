@@ -122,7 +122,7 @@ def _inverse_with_groups(
         # For `preds_norm`, shape is (B, H, T, Q). We slice along T (dim=2).
         # For `trues_norm`, shape is (B, H, T). We slice along T (dim=2).
         target_dim = -1 if data.ndim == 3 else -2
-        
+
         parts = [
             _inverse_with_groups(data.select(target_dim, i), sub, groups)
             for i, sub in enumerate(normalizer.normalizers)
@@ -159,7 +159,7 @@ def run_inference(
     with torch.no_grad():
         for x, y in tqdm(loader, desc="Running inference"):
             x = _move_to_device(x, device)
-            target_norm, _ = y # y is a tuple (target, scale)
+            target_norm, _ = y  # y is a tuple (target, scale)
 
             output_norm = model(x).prediction
             if not isinstance(output_norm, list):
@@ -168,9 +168,11 @@ def run_inference(
             output_norm = torch.stack(output_norm, dim=2)
 
             if not isinstance(target_norm, list):
-                 target_norm = [target_norm]
+                target_norm = [target_norm]
             # Stack to create [B, H, T]
-            target_norm_stacked = torch.stack([t.unsqueeze(1) for t in target_norm], dim=2)
+            target_norm_stacked = torch.stack(
+                [t.unsqueeze(1) for t in target_norm], dim=2
+            )
 
             preds_norm_list.append(output_norm.cpu())
             trues_norm_list.append(target_norm_stacked.cpu())

@@ -36,8 +36,8 @@ time_varying_unknown_reals:
   - rsi_14d
   - macd
   - is_missing
-  - market_return_1d      
-  - relative_return_1d    
+  - market_return_1d
+  - relative_return_1d
 
 scalers:
   default_reals_normalizer: StandardScaler

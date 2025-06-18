@@ -45,7 +45,7 @@ class DirectionalLoss(MultiHorizonMetric):
         if y_pred.ndim == y_true.ndim + 1 and y_pred.shape[-1] > 1:
             median_pred_index = y_pred.shape[-1] // 2
             y_pred = y_pred[..., median_pred_index]
-        
+
         # --- FIX FOR USERWARNING ---
         # Explicitly align shapes to prevent broadcasting warnings from PyTorch.
         # The MultiHorizonMetric can sometimes pass tensors with mismatched shapes.
@@ -59,7 +59,7 @@ class DirectionalLoss(MultiHorizonMetric):
         # Calculate directional penalty weights
         # torch.sign returns -1, 0, 1. Multiplying signs will be > 0 if they are the same.
         signs_match = torch.sign(y_pred) * torch.sign(y_true)
-        
+
         # Apply penalty where signs do not match (signs_match <= 0)
         weights = torch.where(
             signs_match <= 0,
