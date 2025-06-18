@@ -1,0 +1,3 @@
+# conf/model/loss/directional.yaml
+_target_: market_prediction_workbench.losses.DirectionalLoss
+directional_penalty: 2.0 # Penalize wrong direction predictions by a factor of 2

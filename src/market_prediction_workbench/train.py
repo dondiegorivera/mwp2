@@ -41,8 +41,8 @@ torch.backends.cuda.matmul.allow_tf32 = True
 if torch.cuda.is_available():
     try:
         if torch.cuda.get_device_capability()[0] >= 7:
-            torch.set_float32_matmul_precision("medium")
-            print("PyTorch float32 matmul precision set to 'medium' for Tensor Cores.")
+            torch.set_float32_matmul_precision("high")
+            print("PyTorch float32 matmul precision set to 'high' for Tensor Cores.")
         else:
             print(
                 "Current GPU does not have Tensor Cores (or CC < 7.0). Default matmul precision used."

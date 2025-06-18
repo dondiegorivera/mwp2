@@ -61,15 +61,7 @@ def _move_to_device(obj, device):
     return obj
 
 
-# evaluate.py
-# -----------------------------------------------------------------------
-# REPLACE the whole inverse_transform_with_groups(...) helper with this
-# -----------------------------------------------------------------------
-
-# evaluate.py  – replace _inverse_with_groups with this version
-# evaluate.py  ------------------------------------------------------------
-
-
+# evaluate.py  – MODIFIED _inverse_with_groups
 def _inverse_with_groups(
     data: torch.Tensor, normalizer, groups: torch.Tensor
 ) -> torch.Tensor:
@@ -80,7 +72,7 @@ def _inverse_with_groups(
        • Other normalisers      (delegate)
     """
     # ------------------------------------------------------------------ #
-    # 1) GroupNormalizer                                                #
+    # 1) GroupNormalizer                                                 #
     # ------------------------------------------------------------------ #
     if isinstance(normalizer, GroupNormalizer):
         # figure out which keyword, if any, the current build understands
@@ -125,56 +117,24 @@ def _inverse_with_groups(
     # 2) MultiNormalizer                                                 #
     # ------------------------------------------------------------------ #
     if isinstance(normalizer, MultiNormalizer):
+        # --- THIS IS THE CORRECTED LOGIC ---
+        # The `data` tensor has targets along a specific dimension.
+        # For `preds_norm`, shape is (B, H, T, Q). We slice along T (dim=2).
+        # For `trues_norm`, shape is (B, H, T). We slice along T (dim=2).
+        target_dim = -1 if data.ndim == 3 else -2
+        
         parts = [
-            _inverse_with_groups(data[..., i], sub, groups)
+            _inverse_with_groups(data.select(target_dim, i), sub, groups)
             for i, sub in enumerate(normalizer.normalizers)
         ]
-        return torch.stack(parts, dim=-1)
+        return torch.stack(parts, dim=target_dim)
+        # --- END CORRECTION ---
 
     # ------------------------------------------------------------------ #
     # 3) Anything else                                                   #
     # ------------------------------------------------------------------ #
     out = normalizer.inverse_transform(data)
     return torch.as_tensor(out, dtype=data.dtype, device=data.device)
-
-
-def inverse_transform_with_groups(
-    data: torch.Tensor, normalizer, groups: torch.Tensor
-) -> torch.Tensor:
-    """
-    Inverse-transform a tensor normalized by:
-      - GroupNormalizer  => manually invert using get_parameters
-      - MultiNormalizer  => recurse into each sub-normalizer
-      - others           => call built-in inverse_transform
-    """
-    # Handle GroupNormalizer
-    if isinstance(normalizer, GroupNormalizer):
-        group_ids = groups[:, 0].cpu().numpy()
-        params = normalizer.get_parameters(group_ids)
-        mus = torch.from_numpy(params[:, 0]).unsqueeze(1).to(data.device)
-        return (data + 1) * mus
-
-    # Handle MultiNormalizer
-    if isinstance(normalizer, MultiNormalizer):
-        # Special case for single-element data (single target)
-        if data.dim() == 1 or (data.dim() == 2 and data.shape[1] == 1):
-            # Process first target only
-            return inverse_transform_with_groups(
-                data, normalizer.normalizers[0], groups
-            )
-
-        # Multi-target case - process each target separately
-        parts = [
-            inverse_transform_with_groups(data[..., i], subnorm, groups)
-            for i, subnorm in enumerate(normalizer.normalizers)
-        ]
-        return torch.stack(parts, dim=-1)
-
-    # Handle other normalizers
-    arr = normalizer.inverse_transform(data.cpu().numpy())
-    if not isinstance(arr, torch.Tensor):
-        arr = torch.from_numpy(arr)
-    return arr.to(data.device)
 
 
 # -----------------------------------------------------------------------------#
@@ -194,100 +154,61 @@ def run_inference(
 
     preds_norm_list, trues_norm_list = [], []
     tickers_all, t_idx_all = [], []
-    groups_all = []  # Store groups for inverse transform
+    groups_all = []
 
     with torch.no_grad():
         for x, y in tqdm(loader, desc="Running inference"):
             x = _move_to_device(x, device)
+            target_norm, _ = y # y is a tuple (target, scale)
 
-            # normalized target
-            if isinstance(y, (list, tuple)):
-                target_norm = y[0]
-            else:
-                target_norm = y
-
-            # forward
             output_norm = model(x).prediction
-            if isinstance(output_norm, list):
-                output_norm = torch.stack(output_norm, dim=2)
-            else:
-                output_norm = output_norm.unsqueeze(2)
+            if not isinstance(output_norm, list):
+                output_norm = [output_norm]
+            # Stack to create [B, H, T, Q]
+            output_norm = torch.stack(output_norm, dim=2)
 
-            if isinstance(target_norm, list):
-                target_norm = torch.stack(target_norm, dim=2)
-            else:
-                target_norm = target_norm.unsqueeze(2)
+            if not isinstance(target_norm, list):
+                 target_norm = [target_norm]
+            # Stack to create [B, H, T]
+            target_norm_stacked = torch.stack([t.unsqueeze(1) for t in target_norm], dim=2)
 
-            # collect on CPU
             preds_norm_list.append(output_norm.cpu())
-            trues_norm_list.append(target_norm.cpu())
+            trues_norm_list.append(target_norm_stacked.cpu())
 
-            # Store groups for later use in inverse transform
             groups_all.append(x["groups"].cpu())
-
-            # decode tickers & times
             encoded = x["groups"][:, 0].cpu().numpy()
             tickers_all.extend(int(s) for s in decoder.inverse_transform(encoded))
             t_idx_all.append(x["decoder_time_idx"].cpu().numpy())
 
-    # concatenate
-    preds_norm = torch.cat(preds_norm_list, dim=0)  # [B, H, T, Q]
-    trues_norm = torch.cat(trues_norm_list, dim=0)  # [B, H, T]
-    groups = torch.cat(groups_all, dim=0)  # [B, G] where G is number of group columns
+    preds_norm = torch.cat(preds_norm_list, dim=0)
+    trues_norm = torch.cat(trues_norm_list, dim=0)
+    groups = torch.cat(groups_all, dim=0)
     tickers = np.array(tickers_all)
-    time_idx = np.concatenate(t_idx_all, axis=0)  # [B, H]
+    time_idx = np.concatenate(t_idx_all, axis=0)
 
-    # Handle different types of normalizers
-    normalizer = dataset.target_normalizer
+    preds_dec = _inverse_with_groups(preds_norm, dataset.target_normalizer, groups)
+    trues_dec = _inverse_with_groups(trues_norm, dataset.target_normalizer, groups)
 
-    # Inverse-transform predictions
-    preds_dec = []
-    num_targets = preds_norm.shape[2]
+    preds_h1 = preds_dec[:, 0, :, :]
+    trues_h1 = trues_dec[:, 0, :]
 
-    for i in range(num_targets):
-        target_preds = []
-        for q in range(preds_norm.shape[3]):
-            pred_data = preds_norm[:, :, i, q]
-
-            # Get the appropriate normalizer
-            if isinstance(normalizer, MultiNormalizer) and i < len(
-                normalizer.normalizers
-            ):
-                norm = normalizer.normalizers[i]
-            else:
-                norm = normalizer
-
-            # Handle GroupNormalizer specifically
-            if isinstance(norm, GroupNormalizer):
-                decoded = _inverse_with_groups(pred_data, norm, groups)
-            else:
-                decoded = norm.inverse_transform(pred_data)
-                if not isinstance(decoded, torch.Tensor):
-                    decoded = torch.tensor(decoded)
-
-            target_preds.append(decoded)
-
-        preds_dec.append(torch.stack(target_preds, dim=-1))
-
-    # Stack targets: [B, H, T, Q]
-    preds_dec = torch.stack(preds_dec, dim=2)
-
-    # Inverse-transform true values
-    trues_dec = _inverse_with_groups(trues_norm, normalizer, groups)
-
-    # Extract first horizon predictions
-    preds_h1 = preds_dec[:, 0]  # [B, T, Q]
-    trues_h1 = trues_dec[:, 0]  # [B, T]
-
-    # Build result dictionaries
     pred_dict, true_dict = {}, {"ticker": tickers, "time_idx": time_idx[:, 0]}
     short_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
+    num_quantiles = preds_h1.shape[-1]
 
     for i, name in enumerate(short_names):
-        pred_dict[f"{name}_lower"] = preds_h1[:, i, 0].numpy()
-        pred_dict[f"{name}"] = preds_h1[:, i, 1].numpy()
-        pred_dict[f"{name}_upper"] = preds_h1[:, i, 2].numpy()
-        true_dict[name] = trues_h1[:, i].numpy()
+        if num_quantiles > 1:
+            median_idx = num_quantiles // 2
+            pred_dict[f"{name}_lower"] = preds_h1[:, i, 0].numpy()
+            pred_dict[f"{name}"] = preds_h1[:, i, median_idx].numpy()
+            pred_dict[f"{name}_upper"] = preds_h1[:, i, -1].numpy()
+        else:
+            point_prediction = preds_h1[:, i, 0].squeeze().numpy()
+            pred_dict[f"{name}_lower"] = point_prediction
+            pred_dict[f"{name}"] = point_prediction
+            pred_dict[f"{name}_upper"] = point_prediction
+
+        true_dict[name] = trues_h1[:, i].squeeze().numpy()
 
     return pred_dict, true_dict, short_names
 
@@ -302,10 +223,9 @@ def evaluate(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, floa
     metrics = {}
 
     for name in short_names:
-        pred = preds[f"{name}"]  # median prediction
+        pred = preds[f"{name}"]
         true = trues[name]
 
-        # Remove any NaN values
         mask = ~(np.isnan(pred) | np.isnan(true))
         pred = pred[mask]
         true = true[mask]
@@ -313,11 +233,9 @@ def evaluate(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, floa
         if len(pred) == 0:
             continue
 
-        # Calculate metrics
         mae = np.mean(np.abs(pred - true))
         rmse = np.sqrt(np.mean((pred - true) ** 2))
 
-        # Coverage: what fraction of true values fall within prediction intervals
         lower = preds[f"{name}_lower"][mask]
         upper = preds[f"{name}_upper"][mask]
         coverage = np.mean((true >= lower) & (true <= upper))

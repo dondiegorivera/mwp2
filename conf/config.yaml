@@ -22,4 +22,4 @@ paths:
 evaluate:
   batch_size: 4096
   num_workers: 8
-  sample_tickers: ["AAPL", "MSFT", "GE"]  # For visualization
+  sample_tickers: ["AAPL"]  # For visualization

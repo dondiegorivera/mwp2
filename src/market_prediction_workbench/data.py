@@ -330,15 +330,46 @@ def reindex_and_fill_gaps(df: pl.DataFrame, max_ffill_days: int = 5) -> pl.DataF
     return df_filled
 
 
+# In src/market_prediction_workbench/data.py
+
 def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     """
     Creates all model features and targets.
+    - Extracts SPY returns to use as a market feature for all other stocks.
     - Targets: Log-returns for 1, 5, 20 day horizons.
     - Known-future features: Calendar features.
     - Observed-past features: Returns, Volatility, RSI, MACD, etc.
     """
     print("Creating features and targets...")
 
+    df = df.sort("ticker_id", "date")
+
+    # --- Pre-computation for Market Features ---
+    # First, calculate log returns for ALL tickers, including SPY.
+    safe_close_all = pl.when(pl.col("close") <= 1e-6).then(1e-6).otherwise(pl.col("close"))
+    log_return_1d_all = (safe_close_all.log() - safe_close_all.log().shift(1)).over("ticker_id")
+    df = df.with_columns(log_return_1d_all=log_return_1d_all)
+
+    # --- Isolate SPY to create market features ---
+    print("Extracting SPY data for market context features...")
+    df_spy_features = (
+        df.filter(pl.col("ticker") == "SPY")
+        .select(["date", pl.col("log_return_1d_all").alias("market_return_1d")])
+    )
+
+    # --- Remove SPY from main dataframe and join market features ---
+    df_stocks = df.filter(pl.col("ticker") != "SPY")
+    df = df_stocks.join(df_spy_features, on="date", how="left")
+    
+    # Handle potential missing market data (e.g., market holidays)
+    # We forward-fill and then back-fill any remaining NaNs at the start.
+    df = df.with_columns(
+        pl.col("market_return_1d").forward_fill().backward_fill().over("ticker_id")
+    )
+    df = df.drop("log_return_1d_all") # Drop the temporary column
+
+    # Now, df contains only stocks (not SPY) and has the market_return_1d column.
+    # We can proceed with feature engineering.
     df = df.sort("ticker_id", "date")
 
     safe_close = pl.when(pl.col("close") <= 1e-6).then(1e-6).otherwise(pl.col("close"))
@@ -351,30 +382,17 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         (log_close.shift(-20) - log_close).over("ticker_id").alias("target_20d"),
     )
 
-    # --- ADDED PER YOUR RECOMMENDATION ---
-    # Clip obviously impossible returns to prevent outlier explosion.
-    # A 25% daily return is already extreme. We nullify anything beyond that.
     MAX_ABS_DAILY_RETURN = 0.25
-    print(
-        f"Clipping targets with absolute daily log-return > {MAX_ABS_DAILY_RETURN}..."
-    )
     df = df.with_columns(
         [
             pl.when(pl.col("target_1d").abs() > MAX_ABS_DAILY_RETURN)
-            .then(None)
-            .otherwise(pl.col("target_1d"))
-            .alias("target_1d"),
+            .then(None).otherwise(pl.col("target_1d")).alias("target_1d"),
             pl.when(pl.col("target_5d").abs() > MAX_ABS_DAILY_RETURN * 5)
-            .then(None)
-            .otherwise(pl.col("target_5d"))
-            .alias("target_5d"),
+            .then(None).otherwise(pl.col("target_5d")).alias("target_5d"),
             pl.when(pl.col("target_20d").abs() > MAX_ABS_DAILY_RETURN * 20)
-            .then(None)
-            .otherwise(pl.col("target_20d"))
-            .alias("target_20d"),
+            .then(None).otherwise(pl.col("target_20d")).alias("target_20d"),
         ]
     )
-    # --- END OF ADDED BLOCK ---
 
     # --- Feature Engineering ---
     # 1. Known-future (calendar) features
@@ -395,6 +413,12 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # 2. Observed-past features
     log_return_1d_base_expr = log_close - log_close.shift(1)
 
+    # --- Add new relative_return feature ---
+    print("Engineering relative return feature...")
+    df = df.with_columns(
+        relative_return_1d=(log_return_1d_base_expr - pl.col("market_return_1d")).over("ticker_id")
+    )
+
     rolling_volume_mean = pl.col("volume").rolling_mean(window_size=20, min_samples=10)
     rolling_volume_std = pl.col("volume").rolling_std(window_size=20, min_samples=10)
 
@@ -404,7 +428,6 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(0.0)
     )
 
-    # --- CORRECTED: Moved `.over()` outside the `pl.when()` clause ---
     is_missing_mask = pl.col("is_missing").cast(pl.Boolean)
 
     df = df.with_columns(
@@ -443,13 +466,9 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # RSI calculation
     df = df.with_columns(
         gain=pl.when(pl.col("price_change") > 0)
-        .then(pl.col("price_change"))
-        .otherwise(0.0)
-        .alias("gain"),
+        .then(pl.col("price_change")).otherwise(0.0).alias("gain"),
         loss=pl.when(pl.col("price_change") < 0)
-        .then(-pl.col("price_change"))
-        .otherwise(0.0)
-        .alias("loss"),
+        .then(-pl.col("price_change")).otherwise(0.0).alias("loss"),
     )
 
     avg_gain_expr = pl.col("gain").ewm_mean(alpha=1 / 14, min_samples=10)
@@ -473,109 +492,86 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     # MACD
-    ema_12_expr = safe_close.ewm_mean(
-        span=12, min_samples=12 - 1 if (12 - 1) > 0 else 1
-    )
-    ema_26_expr = safe_close.ewm_mean(
-        span=26, min_samples=26 - 1 if (26 - 1) > 0 else 1
-    )
+    ema_12_expr = safe_close.ewm_mean(span=12, min_samples=12 - 1 if (12 - 1) > 0 else 1)
+    ema_26_expr = safe_close.ewm_mean(span=26, min_samples=26 - 1 if (26 - 1) > 0 else 1)
 
-    # CORRECTED: Apply the when/then logic within the `.over()` context
     df = df.with_columns(
         macd_base=(pl.when(~is_missing_mask).then(ema_12_expr - ema_26_expr)).over(
             "ticker_id"
         )
     )
-
-    macd_signal_expr = pl.col("macd_base").ewm_mean(
-        span=9, min_samples=9 - 1 if (9 - 1) > 0 else 1
-    )
+    macd_signal_expr = pl.col("macd_base").ewm_mean(span=9, min_samples=9 - 1 if (9 - 1) > 0 else 1)
     df = df.with_columns(
         macd_signal_base=(pl.when(~is_missing_mask).then(macd_signal_expr)).over(
             "ticker_id"
         )
     )
-
     df = df.rename({"macd_base": "macd", "macd_signal_base": "macd_signal"})
-    # --- END CORRECTION ---
-
+    
     # --- Final Cleanup ---
-
-    # 1. Drop intermediate columns
     intermediate_cols = ["price_change", "gain", "loss", "avg_gain", "avg_loss"]
     cols_to_drop_now = [col for col in intermediate_cols if col in df.columns]
     if cols_to_drop_now:
         df = df.drop(cols_to_drop_now)
 
-    # 2. Convert any generated infinities or NaNs in float columns to proper nulls
-    float_cols = [
-        col_name
-        for col_name, dtype in df.schema.items()
-        if dtype in [pl.Float32, pl.Float64]
-    ]
+    float_cols = [col_name for col_name, dtype in df.schema.items() if dtype in [pl.Float32, pl.Float64]]
     for col_name in float_cols:
         df = df.with_columns(
             pl.when(pl.col(col_name).is_nan() | pl.col(col_name).is_infinite())
-            .then(None)
-            .otherwise(pl.col(col_name))
-            .alias(col_name)
+            .then(None).otherwise(pl.col(col_name)).alias(col_name)
         )
 
-    # --- START: NEW, MORE ROBUST NULL HANDLING ---
-
-    # 3. Drop rows only where essential targets are null.
-    # This keeps the maximum amount of historical data for feature generation.
     target_cols = ["target_1d", "target_5d", "target_20d"]
     df = df.drop_nulls(subset=target_cols)
-    print(f"Shape after dropping rows with null targets: {df.shape}")
 
-    # 4. Forward-fill features to handle nulls at the start of each series.
-    # Then fill any remaining nulls (at the very beginning) with 0.
-    # Exclude IDs, dates, and targets from this fill.
-    feature_cols = [
-        col
-        for col in df.columns
-        if col not in ["ticker", "date", "ticker_id", "sector_id"] + target_cols
-    ]
-    df = df.with_columns(
-        pl.col(feature_cols).forward_fill().over("ticker_id")
-    ).with_columns(pl.col(feature_cols).fill_null(0.0))
-    print(f"Shape after forward-filling and zero-filling features: {df.shape}")
-
-    # 5. As a final safety check, drop any row that might still have a null value.
-    # This should now drop very few, if any, rows.
+    feature_cols = [col for col in df.columns if col not in ["ticker", "date", "ticker_id", "sector_id"] + target_cols]
+    df = df.with_columns(pl.col(feature_cols).forward_fill().over("ticker_id")).with_columns(pl.col(feature_cols).fill_null(0.0))
+    
     df = df.drop_nulls()
-
-    # --- END: NEW, MORE ROBUST NULL HANDLING ---
-
-    # 6. Sort the data
     df = df.sort("ticker_id", "date")
 
-    print(
-        f"Feature creation complete. After NaN/inf handling AND FINAL drop_nulls(), shape: {df.shape}"
-    )
+    print(f"Feature creation complete. After NaN/inf handling AND FINAL drop_nulls(), shape: {df.shape}")
     if df.height == 0:
-        raise ValueError(
-            "All data was dropped after feature engineering and NaN/inf handling. Check data quality and feature logic."
-        )
+        raise ValueError("All data was dropped after feature engineering. Check data quality and feature logic.")
 
-    # 7. Create the final time_idx
-    df = df.with_columns(
-        time_idx=(pl.col("date").rank("ordinal").over("ticker_id") - 1)
-    )
+    df = df.with_columns(time_idx=(pl.col("date").rank("ordinal").over("ticker_id") - 1))
 
     return df
 
-
 if __name__ == "__main__":
+    # --- Argument Parser ---
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Data processing pipeline for the market prediction workbench."
+    )
+    parser.add_argument(
+        "--ticker",
+        type=str,
+        default=None,
+        help="If specified, process data for only this single ticker (e.g., 'AAPL').",
+    )
+    args = parser.parse_args()
+
     DATA_DIR = Path("data")
     RAW_DATA_PATH = DATA_DIR / "raw" / "stock_data.csv"
     PROCESSED_DATA_DIR = DATA_DIR / "processed"
-
     PROCESSED_PARQUET_PATH = PROCESSED_DATA_DIR / "processed_data.parquet"
 
     print("--- Starting Data Pipeline ---")
+    if args.ticker:
+        print(f"** Running pipeline for single ticker: {args.ticker.upper()} **")
+
     df_initial = load_and_clean_data(RAW_DATA_PATH)
+
+    if args.ticker:
+        # The 'ticker' column is created in load_and_clean_data. Filter on it here.
+        df_initial = df_initial.filter(pl.col("ticker") == args.ticker.upper())
+        if df_initial.is_empty():
+            print(
+                f"Warning: Ticker '{args.ticker.upper()}' not found in the raw data. The pipeline will likely fail or produce an empty file."
+            )
+
     initial_rows = df_initial.height
 
     df_mapped = create_mappings(df_initial, PROCESSED_DATA_DIR)
@@ -603,4 +599,8 @@ if __name__ == "__main__":
         df_final.write_parquet(PROCESSED_PARQUET_PATH)
     else:
         print("No data left after processing. Parquet file not saved.")
+        if args.ticker:
+            print(
+                f"This may be because ticker '{args.ticker.upper()}' had no data remaining after processing."
+            )
     print("--- Data Pipeline Complete ---")

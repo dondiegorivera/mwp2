@@ -93,12 +93,20 @@ class GlobalTFT(pl.LightningModule):
         num_targets = len(timeseries_dataset.target_names)
 
         loss_instance = model_specific_params.get("loss")
-        quantiles = (
-            loss_instance.quantiles if hasattr(loss_instance, "quantiles") else [0.5]
-        )
-        output_size = len(quantiles)
+        
+        # --- MODIFIED LOGIC FOR OUTPUT_SIZE ---
+        # If the loss has quantiles (like QuantileLoss), set output size to the number of quantiles.
+        # Otherwise, for point-forecast losses like MSE or our DirectionalLoss, set it to 1.
+        if hasattr(loss_instance, "quantiles") and loss_instance.quantiles:
+            output_size = len(loss_instance.quantiles)
+            print(f"Quantile-based loss detected. Setting output_size to {output_size}.")
+        else:
+            output_size = 1
+            print(f"Point-forecast loss detected. Setting output_size to {output_size}.")
+
         if "output_size" not in model_specific_params:
             model_specific_params["output_size"] = output_size
+        # --- END MODIFIED LOGIC ---
 
         # We save the parameters, not the full dataset object.
         # The model_specific_params might contain non-serializable objects (like the loss function instance)

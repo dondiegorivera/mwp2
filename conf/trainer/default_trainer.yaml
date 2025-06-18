@@ -1,5 +1,5 @@
 # conf/trainer/default_trainer.yaml
-epochs: 10 # Default number of epochs
+epochs: 50 # Default number of epochs
 batch_size: 4096 # Default batch size for training
 num_workers: 8 # Default num_workers for DataLoaders, adjust based on system
 # patience_for_early_stopping: 5
