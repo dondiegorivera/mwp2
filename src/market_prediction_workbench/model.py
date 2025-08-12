@@ -167,6 +167,11 @@ class GlobalTFT(pl.LightningModule):
         print("DEBUG: model.logging_metrics has been cleared for debugging.")
 
     # ... _process_input_data, _prepare_target_tensor, _prepare_scale_tensor ...
+
+    def on_fit_start(self):
+        # attach the parent Trainer to the inner PF model so its hooks/logging work
+        self.model.trainer = self.trainer
+
     def _process_input_data(self, data_element):
         # print(f"DEBUG _process_input_data: received type {type(data_element)}")
         if torch.is_tensor(data_element):
@@ -239,6 +244,13 @@ class GlobalTFT(pl.LightningModule):
                     f"Unsupported type {type(data_element)} for _process_input_data. Error: {e}"
                 ) from e
 
+    def on_fit_start(self):
+        # attach trainer to inner model
+        self.model.trainer = self.trainer
+        # proxy logging so inner model logs via the outer LightningModule (this one)
+        self.model.log = lambda *a, **k: self.log(*a, **k)
+        self.model.log_dict = lambda *a, **k: self.log_dict(*a, **k)
+
     def _prepare_target_tensor(self, raw_target_data):
         target = self._process_input_data(raw_target_data)
 
@@ -263,55 +275,12 @@ class GlobalTFT(pl.LightningModule):
         return self.model(x_batch)
 
     def training_step(self, batch, batch_idx):
-        x, y = batch
-        out = self(x)
-        target, _ = y  # y is a tuple of (target, scale)
-
-        # --- THE CORRECT FIX for both AttributeError and IndexError ---
-        # The loss function expects a time dimension for each target.
-        # Since max_prediction_horizon=1, targets from the dataloader are 1D.
-        # We must add a time dimension of size 1.
-        if isinstance(target, list):
-            # If multi-target, reshape each tensor in the list.
-            # Shape changes from [(B,), (B,), ...] to [(B, 1), (B, 1), ...]
-            reshaped_target = [t.unsqueeze(1) for t in target]
-        else:
-            # If single-target, reshape the single tensor.
-            # Shape changes from (B,) to (B, 1)
-            reshaped_target = target.unsqueeze(1)
-        # --- END FIX ---
-
-        loss_val = self.model.loss(out.prediction, reshaped_target)
-        bs = (
-            reshaped_target[0].size(0)
-            if isinstance(reshaped_target, list)
-            else reshaped_target.size(0)
-        )
-        self.log(
-            "train_loss",
-            loss_val,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=bs,
-        )
-        return loss_val
+        self.model.trainer = self.trainer
+        return self.model.training_step(batch, batch_idx)
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
-        out = self(x)
-        target, _ = y
-
-        # --- THE CORRECT FIX (Applied to validation as well) ---
-        if isinstance(target, list):
-            reshaped_target = [t.unsqueeze(1) for t in target]
-        else:
-            reshaped_target = target.unsqueeze(1)
-        # --- END FIX ---
-
-        loss_val = self.model.loss(out.prediction, reshaped_target)
-        self.log("val_loss", loss_val)
-        return loss_val
+        self.model.trainer = self.trainer
+        return self.model.validation_step(batch, batch_idx)
 
     def configure_optimizers(self):
         optimizer = AdamW(
