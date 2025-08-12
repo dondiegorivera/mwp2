@@ -1,28 +1,23 @@
 # conf/trainer/default_trainer.yaml
-epochs: 10 # Default number of epochs
-batch_size: 4096 # Default batch size for training
-num_workers: 8 # Default num_workers for DataLoaders, adjust based on system
-# patience_for_early_stopping: 5
+epochs: 10
+batch_size: 4096
+num_workers: 8
 
-# PyTorch Lightning Trainer arguments
-# These can be overridden from command line e.g. trainer.max_epochs=1
 max_epochs: ${trainer.epochs}
-# gpus: 1 # or devices=1, accelerator="gpu"
-accelerator: "auto" # PTL will try to pick best available
-devices: "auto" # "auto", 1 (for 1 GPU), or [0,1] for specific GPUs
+accelerator: "auto"
+devices: "auto"
 
-# For EarlyStopping
 early_stopping_monitor: "val_loss"
 early_stopping_patience: 5
 early_stopping_mode: "min"
 
-# For LearningRateMonitor
 lr_monitor_logging_interval: "epoch"
-
-# gradient clipping to prevent explosions:
 gradient_clip_val: 1.0
 
-# WandB Logger (optional)
-use_wandb: true # <--- CHANGE THIS TO true
-wandb_project_name: "market-tft" # You can change this if you like
-wandb_entity: "rolandpolczer-roland-polczer" # <--- REPLACE THIS with your W&B username or team name
+# WandB
+use_wandb: true
+wandb_project_name: "market-tft"
+wandb_entity: "rolandpolczer-roland-polczer"
+
+# NEW
+use_weighted_sampler: true

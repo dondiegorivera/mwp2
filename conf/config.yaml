@@ -1,25 +1,31 @@
 # conf/config.yaml
 defaults:
-  - data: default_data_config # We'll create this file next
-  - model: tft_default       # And this one
-  - trainer: default_trainer # And this
-  - _self_ # Allows overriding defaults from this file itself
+  - data: default_data_config
+  - model: tft_default
+  - trainer: default_trainer
+  - _self_
 
-# General experiment parameters
 project_name: "market_prediction_workbench"
-experiment_id: "B_default" # Can be overridden by CLI or specific experiment configs
-seed: 42 # For reproducibility
+experiment_id: "B_default"
+seed: 42
 
-# Paths (can be relative to project root or absolute if needed)
 paths:
   data_dir: "data"
   raw_data_file: "${paths.data_dir}/raw/stock_data.csv"
   processed_data_file: "${paths.data_dir}/processed/processed_data.parquet"
-  log_dir: "experiments" # For PyTorch Lightning logs, MLflow, etc.
-  # ticker_map_file: "${paths.data_dir}/processed/ticker_map.parquet" # Might be needed for num_tickers
-  # sector_map_file: "${paths.data_dir}/processed/sector_map.parquet" # Might be needed for num_sectors
+  log_dir: "experiments"
+
+# NEW: central knobs for splitting & sampler
+data:
+  split:
+    use_date_split: true
+    train_pct: 0.8
+    embargo_days: 30
+
+trainer:
+  use_weighted_sampler: true
 
 evaluate:
   batch_size: 4096
   num_workers: 8
-  sample_tickers: ["AAPL", "MSFT", "GE"]  # For visualization
+  sample_tickers: ["ALL"]

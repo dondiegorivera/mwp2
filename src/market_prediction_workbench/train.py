@@ -7,15 +7,13 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import os
 import shutil
 from hydra.core.hydra_config import HydraConfig
 
-# Import our custom modules
 from market_prediction_workbench.model import GlobalTFT
 
-# Import pytorch-forecasting specific items
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import (
     GroupNormalizer,
@@ -24,16 +22,13 @@ from pytorch_forecasting.data.encoders import (
     MultiNormalizer,
 )
 
-# Import Lightning Callbacks
 from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
 )
 
-# Import scikit-learn's StandardScaler if we intend to use it
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
-
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -55,110 +50,59 @@ else:
     print("CUDA not available. Running on CPU. Matmul precision setting skipped.")
 
 
-# RESTORED: Full, verbose, and robust helper function from your original file
 def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
     embedding_sizes = {}
-
-    # Access the internal attribute _categorical_encoders, which is populated by TimeSeriesDataSet
     dataset_encoders = timeseries_dataset._categorical_encoders
 
-    # Check if _categorical_encoders attribute exists and is a non-empty dictionary
     if not isinstance(dataset_encoders, dict) or not dataset_encoders:
-        if (
-            timeseries_dataset.categoricals
-        ):  # Check if there are any categoricals defined in the dataset
+        if timeseries_dataset.categoricals:
             print(
-                "Warning (get_embedding_sizes_for_tft): TimeSeriesDataSet._categorical_encoders is missing, not a dict, or empty, "
-                "but dataset has categorical columns. TFT might use defaults or error."
+                "Warning: _categorical_encoders missing/empty but dataset has categoricals."
             )
-        return {}  # Return empty if no encoders or not a dict
+        return {}
 
-    print(
-        f"DEBUG (get_embedding_sizes_for_tft): Processing encoders from TimeSeriesDataSet._categorical_encoders: {dataset_encoders}"
-    )
-
-    for col_name in (
-        timeseries_dataset.categoricals
-    ):  # Iterate over actual categoricals defined in dataset
+    for col_name in timeseries_dataset.categoricals:
         if col_name in dataset_encoders:
             encoder = dataset_encoders[col_name]
-            print(
-                f"DEBUG (get_embedding_sizes_for_tft): Encoder for '{col_name}': {encoder}, type: {type(encoder)}"
-            )
 
             cardinality_val = None
-            # Try .cardinality property first (NaNLabelEncoder has this)
             if hasattr(encoder, "cardinality"):
                 try:
                     cardinality_val = encoder.cardinality
-                    if cardinality_val is not None:
-                        print(
-                            f"DEBUG (get_embedding_sizes_for_tft): Accessed encoder.cardinality for '{col_name}': {cardinality_val}"
-                        )
-                    else:
-                        print(
-                            f"DEBUG (get_embedding_sizes_for_tft): encoder.cardinality for '{col_name}' returned None."
-                        )
                 except AttributeError:
-                    print(
-                        f"DEBUG (get_embedding_sizes_for_tft): AttributeError on encoder.cardinality for '{col_name}'. Will try .classes_."
-                    )
                     cardinality_val = None
 
-            if cardinality_val is None:  # Fallback or if .cardinality was None
+            if cardinality_val is None:
                 if hasattr(encoder, "classes_") and encoder.classes_ is not None:
                     num_classes = len(encoder.classes_)
-                    add_nan_flag = False
-                    # Check for add_nan attribute (specific to NaNLabelEncoder but good general check)
-                    # NaNLabelEncoder is the main one that uses add_nan and contributes to cardinality this way
-                    if hasattr(encoder, "add_nan") and isinstance(
-                        encoder, NaNLabelEncoder
-                    ):
-                        add_nan_flag = encoder.add_nan
-
-                    cardinality_val = num_classes + (1 if add_nan_flag else 0)
-
-                    print(
-                        f"DEBUG (get_embedding_sizes_for_tft): Calculated cardinality from len(encoder.classes_) for '{col_name}': {cardinality_val} (add_nan={add_nan_flag})"
+                    add_nan_flag = (
+                        hasattr(encoder, "add_nan")
+                        and isinstance(encoder, NaNLabelEncoder)
+                        and encoder.add_nan
                     )
+                    cardinality_val = num_classes + (1 if add_nan_flag else 0)
                 else:
                     print(
-                        f"ERROR (get_embedding_sizes_for_tft): Could not determine cardinality for '{col_name}'. Skipping."
+                        f"ERROR: Could not determine cardinality for '{col_name}'. Skipping."
                     )
                     continue
 
-            if cardinality_val is None:  # Should not happen if logic above is complete
-                print(
-                    f"ERROR (get_embedding_sizes_for_tft): Cardinality for '{col_name}' is unexpectedly None. Skipping."
-                )
-                continue
-
-            # For TFT, cardinality must be at least 1.
             tft_cardinality = max(1, cardinality_val)
-
-            # Calculate embedding dimension
-            if tft_cardinality <= 1:  # e.g. only one unique value or only NaNs
+            if tft_cardinality <= 1:
                 dim = 1
             else:
-                # Using the project's original formula
                 dim = min(round(tft_cardinality**0.25), 32)
-                dim = max(1, int(dim))  # Ensure dim is at least 1
-
+                dim = max(1, int(dim))
             embedding_sizes[col_name] = (tft_cardinality, dim)
-            print(
-                f"DEBUG (get_embedding_sizes_for_tft): Setting embedding for '{col_name}': ({tft_cardinality}, {dim})"
-            )
+            print(f"DEBUG embedding for '{col_name}': ({tft_cardinality}, {dim})")
         else:
             print(
-                f"Warning (get_embedding_sizes_for_tft): Categorical column '{col_name}' (from dataset.categoricals) "
-                f"not found in TimeSeriesDataSet._categorical_encoders. This is unexpected if encoders were meant to be created for all."
+                f"Warning: categorical '{col_name}' missing in _categorical_encoders."
             )
 
     if not embedding_sizes and timeseries_dataset.categoricals:
-        print(
-            "Warning (get_embedding_sizes_for_tft): Resulting embedding_sizes dictionary is empty, but dataset has categoricals. TFT will use defaults or error."
-        )
-    elif embedding_sizes:
+        print("Warning: embedding_sizes empty; TFT will use defaults or error.")
+    else:
         print(f"Calculated embedding_sizes for TFT: {embedding_sizes}")
     return embedding_sizes
 
@@ -171,6 +115,16 @@ def split_before(ds: TimeSeriesDataSet, pct: float = 0.8):
         TimeSeriesDataSet.from_dataset(ds, train_df),
         TimeSeriesDataSet.from_dataset(ds, val_df),
     )
+
+
+def _cfg_list(val):
+    if val is None:
+        return []
+    if isinstance(val, (str, int, float)):
+        return [str(val)]
+    if isinstance(val, (list, ListConfig)):
+        return [str(v) for v in val]
+    raise TypeError(f"Unsupported cfg node type: {type(val)}")
 
 
 @hydra.main(config_path="../../conf", config_name="config", version_base=None)
@@ -193,7 +147,15 @@ def main(cfg: DictConfig) -> None:
     data_pd = polars_data_df.to_pandas()
     print(f"Loaded and converted to Pandas DataFrame. Shape: {data_pd.shape}")
 
-    time_idx_col_name = str(cfg.data.time_idx)
+    # Ensure proper dtypes
+    if "date" in data_pd.columns:
+        data_pd["date"] = pd.to_datetime(data_pd["date"])
+    else:
+        raise ValueError("Required column 'date' not found in processed data.")
+
+    time_idx_col_name = (
+        str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx"
+    )
     if time_idx_col_name in data_pd.columns:
         data_pd[time_idx_col_name] = data_pd[time_idx_col_name].astype(np.int64)
     else:
@@ -236,8 +198,11 @@ def main(cfg: DictConfig) -> None:
     time_varying_unknown_reals_list = get_list_from_cfg_node(
         OmegaConf.select(cfg, "data.time_varying_unknown_reals", default=[])
     )
-    time_idx_str = str(cfg.data.time_idx)
+    time_idx_str = (
+        str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx"
+    )
 
+    # Cast configured categoricals to str
     all_categorical_cols_from_config = list(
         dict.fromkeys(
             static_categoricals_list
@@ -261,18 +226,46 @@ def main(cfg: DictConfig) -> None:
                 f"Warning: Configured categorical column '{cat_col_name_str}' not found in DataFrame for dtype casting."
             )
 
-    # --- CORRECTED: Split DataFrame BEFORE creating TimeSeriesDataSet objects ---
-    max_time_idx = data_pd[time_idx_str].max()
-    train_cutoff_idx = int(max_time_idx * 0.8)
-    print(f"Splitting data for training/validation at time_idx: {train_cutoff_idx}")
+    # --- DATE-BASED SPLIT WITH EMBARGO ---
+    if OmegaConf.select(cfg, "data.split.use_date_split", default=True):
+        min_date, max_date = data_pd["date"].min(), data_pd["date"].max()
+        train_frac = float(OmegaConf.select(cfg, "data.split.train_pct", default=0.8))
+        embargo_days = int(OmegaConf.select(cfg, "data.split.embargo_days", default=30))
+        cutoff_date = min_date + (max_date - min_date) * train_frac
+        embargo = pd.Timedelta(days=embargo_days)
 
-    train_df = data_pd[data_pd[time_idx_str] <= train_cutoff_idx]
-    val_df = data_pd[data_pd[time_idx_str] > train_cutoff_idx]
+        train_df = data_pd[data_pd["date"] <= (cutoff_date - embargo)]
+        val_df = data_pd[data_pd["date"] >= (cutoff_date + embargo)]
+        print(
+            f"Date split: train ≤ {cutoff_date - embargo:%Y-%m-%d}, val ≥ {cutoff_date + embargo:%Y-%m-%d}"
+        )
+    else:
+        # fallback to time_idx split
+        max_time_idx = data_pd[time_idx_str].max()
+        train_cutoff_idx = int(max_time_idx * 0.8)
+        print(f"Splitting data for training/validation at time_idx: {train_cutoff_idx}")
+        train_df = data_pd[data_pd[time_idx_str] <= train_cutoff_idx]
+        val_df = data_pd[data_pd[time_idx_str] > train_cutoff_idx]
 
     print(f"Training DataFrame shape: {train_df.shape}")
     print(f"Validation DataFrame shape: {val_df.shape}")
 
-    # Common parameters for both datasets
+    # --- ensure validation only contains groups seen in training ---
+    # PF encoders/normalizers are fit on training; unseen groups in val will error.
+    if "ticker_id" in train_df.columns and "ticker_id" in val_df.columns:
+        # both were cast to string above for categoricals – keep consistent
+        train_tickers = set(train_df["ticker_id"].astype(str).unique())
+        before_rows = len(val_df)
+        before_tickers = val_df["ticker_id"].nunique()
+        val_df = val_df[val_df["ticker_id"].astype(str).isin(train_tickers)].copy()
+        after_rows = len(val_df)
+        after_tickers = val_df["ticker_id"].nunique()
+        print(
+            f"Validation filter: kept {after_rows}/{before_rows} rows; "
+            f"tickers {after_tickers}/{before_tickers} overlap with training."
+        )
+
+    # --- DATASET PARAMS ---
     dataset_params = dict(
         time_idx=time_idx_str,
         target=target_list[0] if len(target_list) == 1 else target_list,
@@ -291,17 +284,28 @@ def main(cfg: DictConfig) -> None:
         allow_missing_timesteps=True,
     )
 
-    # Scaler and Normalizer Logic (applied to training_dataset first)
+    # --- SCALERS / NORMALIZERS ---
+    # exclude booleans and raw calendar integers from per-ticker scaling
+    EXCLUDE_FROM_SCALING = {
+        "is_quarter_end",
+        "is_missing",
+        "day_of_week",
+        "day_of_month",
+        "month",
+    }
     scalers = {}
     if cfg.data.get("scalers") and cfg.data.scalers.get("default_reals_normalizer"):
         default_normalizer_name = cfg.data.scalers.default_reals_normalizer
-        reals_to_scale = list(
+        reals_to_scale_all = list(
             dict.fromkeys(
                 time_varying_unknown_reals_list
                 + time_varying_known_reals_list
                 + static_reals_list
             )
         )
+        reals_to_scale = [
+            c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING
+        ]
         for col in reals_to_scale:
             if default_normalizer_name == "GroupNormalizer":
                 scalers[col] = GroupNormalizer(groups=group_ids_list, method="standard")
@@ -311,15 +315,18 @@ def main(cfg: DictConfig) -> None:
                 scalers[col] = SklearnStandardScaler()
     else:
         print(
-            "No 'default_reals_normalizer' specified. Using GroupNormalizer as default."
+            "No 'default_reals_normalizer' specified. Using GroupNormalizer as default (excluding flags/raw calendars)."
         )
-        reals_to_scale = list(
+        reals_to_scale_all = list(
             dict.fromkeys(
                 time_varying_unknown_reals_list
                 + time_varying_known_reals_list
                 + static_reals_list
             )
         )
+        reals_to_scale = [
+            c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING
+        ]
         for col in reals_to_scale:
             scalers[str(col)] = GroupNormalizer(
                 groups=group_ids_list, method="standard"
@@ -335,10 +342,7 @@ def main(cfg: DictConfig) -> None:
             for _ in target_list:
                 if single_target_normalizer_prototype_name == "GroupNormalizer":
                     normalizers_list.append(
-                        GroupNormalizer(
-                            groups=group_ids_list,
-                            method="standard",
-                        )
+                        GroupNormalizer(groups=group_ids_list, method="standard")
                     )
                 elif single_target_normalizer_prototype_name == "EncoderNormalizer":
                     normalizers_list.append(EncoderNormalizer())
@@ -356,7 +360,6 @@ def main(cfg: DictConfig) -> None:
             elif single_target_normalizer_prototype_name == "StandardScaler":
                 final_target_normalizer = SklearnStandardScaler()
 
-    # Create training dataset. This dataset "learns" the scalers.
     print("Creating training TimeSeriesDataSet...")
     training_dataset = TimeSeriesDataSet(
         train_df,
@@ -366,7 +369,6 @@ def main(cfg: DictConfig) -> None:
     )
     print("Training TimeSeriesDataSet created successfully.")
 
-    # Create validation dataset from the training dataset to ensure scalers are reused.
     print("Creating validation TimeSeriesDataSet from training dataset...")
     validation_dataset = TimeSeriesDataSet.from_dataset(
         training_dataset, val_df, allow_missing_timesteps=True
@@ -400,17 +402,16 @@ def main(cfg: DictConfig) -> None:
     model_specific_params_from_cfg["embedding_sizes"] = calculated_embedding_sizes
 
     model = model_module(
-        timeseries_dataset=training_dataset,  # Initialize model with training dataset parameters
+        timeseries_dataset=training_dataset,
         model_specific_params=model_specific_params_from_cfg,
         learning_rate=cfg.model.learning_rate,
         weight_decay=cfg.model.weight_decay,
     )
     print(f"Model {cfg.model._target_} (GlobalTFT wrapper) initialized.")
 
-    # REMOVED WeightedRandomSampler logic
-    print("Using default shuffling for train_loader.")
+    # --- TRAIN DATALOADER (optional balanced sampling) ---
     num_cpu = os.cpu_count()
-    train_loader = training_dataset.to_dataloader(
+    train_loader_kwargs = dict(
         train=True,
         batch_size=cfg.trainer.batch_size,
         num_workers=(
@@ -418,11 +419,78 @@ def main(cfg: DictConfig) -> None:
             if num_cpu and num_cpu > 2
             else cfg.trainer.num_workers
         ),
-        shuffle=True,
         pin_memory=True,
         persistent_workers=True if cfg.trainer.num_workers > 0 else False,
         prefetch_factor=4,
     )
+
+    use_weighted = bool(
+        OmegaConf.select(cfg, "trainer.use_weighted_sampler", default=False)
+    )
+    train_loader = None
+
+    # --- TRAIN DATALOADER (optional balanced sampling) ---
+    num_cpu = os.cpu_count()
+    train_loader_kwargs = dict(
+        train=True,
+        batch_size=cfg.trainer.batch_size,
+        num_workers=(
+            min(num_cpu - 2, cfg.trainer.num_workers)
+            if num_cpu and num_cpu > 2
+            else cfg.trainer.num_workers
+        ),
+        pin_memory=True,
+        persistent_workers=True if cfg.trainer.num_workers > 0 else False,
+        prefetch_factor=4,
+    )
+
+    use_weighted = bool(
+        OmegaConf.select(cfg, "trainer.use_weighted_sampler", default=False)
+    )
+    train_loader = None
+
+    if use_weighted:
+        try:
+            # Fast, vectorized per-sample weights from the dataset's sample index
+            idx_df = training_dataset.index
+            if idx_df is None:
+                raise RuntimeError("training_dataset.index is not available")
+
+            group_col = (
+                f"__group_id__{group_ids_list[0]}"  # e.g. "__group_id__ticker_id"
+            )
+            grp_vals = idx_df[group_col].astype(str)
+            counts = grp_vals.value_counts()
+            mapped_counts = counts.reindex(grp_vals).to_numpy()
+            weights_np = (1.0 / mapped_counts).astype("float32")
+
+            sampler = WeightedRandomSampler(
+                weights=torch.from_numpy(weights_np),
+                num_samples=len(weights_np),
+                replacement=True,
+            )
+
+            train_loader = training_dataset.to_dataloader(
+                sampler=sampler,
+                shuffle=False,  # must be False when sampler is set
+                **train_loader_kwargs,
+            )
+            print(
+                f"Using WeightedRandomSampler over {len(counts)} groups for {len(weights_np)} samples."
+            )
+
+        except Exception as e:
+            print(f"Weighted sampler setup failed ({e}); falling back to shuffle=True.")
+            train_loader = training_dataset.to_dataloader(
+                shuffle=True,
+                **train_loader_kwargs,
+            )
+    else:
+        print("Using default shuffling for train_loader.")
+        train_loader = training_dataset.to_dataloader(
+            shuffle=True,
+            **train_loader_kwargs,
+        )
 
     val_loader = validation_dataset.to_dataloader(
         train=False,
@@ -481,6 +549,21 @@ def main(cfg: DictConfig) -> None:
                 print(f"Error copying .hydra directory: {e}")
         else:
             print("Warning: Could not determine logger.log_dir. Skipping config copy.")
+        # Log split stats
+        try:
+            import wandb
+
+            wandb.run.summary["train_rows"] = len(train_df)
+            wandb.run.summary["val_rows"] = len(val_df)
+            wandb.run.summary["train_min_date"] = str(train_df["date"].min())
+            wandb.run.summary["train_max_date"] = str(train_df["date"].max())
+            wandb.run.summary["val_min_date"] = str(val_df["date"].min())
+            wandb.run.summary["val_max_date"] = str(val_df["date"].max())
+            wandb.run.summary["group_ids"] = group_ids_list
+            wandb.run.summary["known_reals"] = time_varying_known_reals_list
+            wandb.run.summary["unknown_reals"] = time_varying_unknown_reals_list
+        except Exception as e:
+            print(f"W&B split logging failed: {e}")
     else:
         print("WandB Logger is disabled.")
 
