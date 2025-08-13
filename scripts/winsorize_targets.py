@@ -13,17 +13,22 @@ import numpy as np
 TARGET_COLS = ["target_1d", "target_5d", "target_20d"]
 # per-horizon tail caps (two-sided). Tweak if needed.
 CAPS = {
-    "target_1d":  99.5,   # clip |1d| at 99.5th abs-quantile
-    "target_5d":  99.2,
+    "target_1d": 99.5,  # clip |1d| at 99.5th abs-quantile
+    "target_5d": 99.2,
     "target_20d": 99.0,
 }
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in",  dest="inp",  required=True, type=Path)
+    ap.add_argument("--in", dest="inp", required=True, type=Path)
     ap.add_argument("--out", dest="out", required=True, type=Path)
-    ap.add_argument("--train-cutoff", type=float, default=0.8,
-                    help="fractional split by time_idx per ticker")
+    ap.add_argument(
+        "--train-cutoff",
+        type=float,
+        default=0.8,
+        help="fractional split by time_idx per ticker",
+    )
     args = ap.parse_args()
 
     df = pd.read_parquet(args.inp)
@@ -69,6 +74,7 @@ def main():
         if c in df2.columns:
             q = np.nanpercentile(np.abs(df2[c].to_numpy()), [95, 99, 99.9])
             print(f"{c}: |q95|={q[0]:.4f}, |q99|={q[1]:.4f}, |q99.9|={q[2]:.4f}")
+
 
 if __name__ == "__main__":
     main()

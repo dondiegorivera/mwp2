@@ -456,20 +456,26 @@ def main(cfg: DictConfig) -> None:
             if idx_df is None:
                 raise RuntimeError("training_dataset.index is not available")
 
-            group_col = f"__group_id__{group_ids_list[0]}"  # e.g., "__group_id__ticker_id"
+            group_col = (
+                f"__group_id__{group_ids_list[0]}"  # e.g., "__group_id__ticker_id"
+            )
             grp_vals = idx_df[group_col].astype(str)
             counts = idx_df[group_col].value_counts()
             mapped_counts = counts.reindex(grp_vals).to_numpy()
-            weights = idx_df[group_col].map(counts).rpow(-1.0).astype(np.float64).values  # 1 / count
+            weights = (
+                idx_df[group_col].map(counts).rpow(-1.0).astype(np.float64).values
+            )  # 1 / count
             weights_np = (1.0 / mapped_counts).astype("float32")
 
-            sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+            sampler = WeightedRandomSampler(
+                weights=weights, num_samples=len(weights), replacement=True
+            )
 
             train_loader = training_dataset.to_dataloader(
                 train=True,
                 batch_size=cfg.trainer.batch_size,
-                sampler=sampler,          # <--- use sampler
-                shuffle=False,            # <--- must be False when sampler is set
+                sampler=sampler,  # <--- use sampler
+                shuffle=False,  # <--- must be False when sampler is set
                 num_workers=...,
                 pin_memory=True,
                 persistent_workers=True if cfg.trainer.num_workers > 0 else False,

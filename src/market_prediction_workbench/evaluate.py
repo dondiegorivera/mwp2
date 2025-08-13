@@ -291,8 +291,12 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_name
     for name in short_tgt_names:
         df_plot[name] = trues.get(f"{name}@h1")
         df_plot[f"p_{name}"] = preds.get(f"{name}@h1")
-        df_plot[f"p_{name}_lower"] = preds.get(f"{name}_lower_cal@h1", preds.get(f"{name}_lower@h1"))
-        df_plot[f"p_{name}_upper"] = preds.get(f"{name}_upper_cal@h1", preds.get(f"{name}_upper@h1"))
+        df_plot[f"p_{name}_lower"] = preds.get(
+            f"{name}_lower_cal@h1", preds.get(f"{name}_lower@h1")
+        )
+        df_plot[f"p_{name}_upper"] = preds.get(
+            f"{name}_upper_cal@h1", preds.get(f"{name}_upper@h1")
+        )
 
     for tk in sample_tickers:
         tid = _safe_ticker_id(ticker_map, tk)
@@ -373,7 +377,9 @@ def save_output(
     print(f"\nResults written to {out_dir}")
 
 
-def compute_calibration_alphas(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, float]:
+def compute_calibration_alphas(
+    preds: Dict, trues: Dict, short_names: List[str]
+) -> Dict[str, float]:
     """
     Compute per-target alpha from horizon 1 only:
       alpha = 90th percentile of |resid| / (1.645 * s_hat),
@@ -382,9 +388,9 @@ def compute_calibration_alphas(preds: Dict, trues: Dict, short_names: List[str])
     alphas = {}
     for name in short_names:
         p50 = preds.get(f"{name}@h1")
-        y   = trues.get(f"{name}@h1")
-        lo  = preds.get(f"{name}_lower@h1")
-        hi  = preds.get(f"{name}_upper@h1")
+        y = trues.get(f"{name}@h1")
+        lo = preds.get(f"{name}_lower@h1")
+        hi = preds.get(f"{name}_upper@h1")
 
         if p50 is None or y is None or lo is None or hi is None:
             alphas[name] = float("nan")
@@ -404,7 +410,9 @@ def compute_calibration_alphas(preds: Dict, trues: Dict, short_names: List[str])
     return alphas
 
 
-def add_calibrated_intervals(preds: Dict, short_names: List[str], num_horizons: int, alphas: Dict[str, float]) -> None:
+def add_calibrated_intervals(
+    preds: Dict, short_names: List[str], num_horizons: int, alphas: Dict[str, float]
+) -> None:
     """
     Add calibrated intervals as NEW keys:
       *_lower_cal@h*, *_upper_cal@h*
@@ -414,14 +422,14 @@ def add_calibrated_intervals(preds: Dict, short_names: List[str], num_horizons: 
         alpha = alphas.get(name, float("nan"))
         for h in range(1, num_horizons + 1):
             key_mid = f"{name}@h{h}"
-            key_lo  = f"{name}_lower@h{h}"
-            key_hi  = f"{name}_upper@h{h}"
+            key_lo = f"{name}_lower@h{h}"
+            key_hi = f"{name}_upper@h{h}"
             if key_mid not in preds or key_lo not in preds or key_hi not in preds:
                 continue
 
             mid = preds[key_mid]
-            lo  = preds[key_lo]
-            hi  = preds[key_hi]
+            lo = preds[key_lo]
+            hi = preds[key_hi]
 
             s_hat = (hi - lo) / (2.0 * 1.645)
 
@@ -436,7 +444,9 @@ def add_calibrated_intervals(preds: Dict, short_names: List[str], num_horizons: 
             preds[f"{name}_upper_cal@h{h}"] = hi_cal
 
 
-def evaluate_with_calibrated(preds: Dict, trues: Dict, short_names: List[str], num_horizons: int) -> Dict[str, float]:
+def evaluate_with_calibrated(
+    preds: Dict, trues: Dict, short_names: List[str], num_horizons: int
+) -> Dict[str, float]:
     """
     Reuse the existing `evaluate()` but temporarily point lower/upper
     to the calibrated versions for coverage computation.
@@ -450,7 +460,6 @@ def evaluate_with_calibrated(preds: Dict, trues: Dict, short_names: List[str], n
                 cal_preds[f"{name}_lower@h{h}"] = lo_cal
                 cal_preds[f"{name}_upper@h{h}"] = hi_cal
     return evaluate(cal_preds, trues, short_names)
-
 
 
 # -----------------------------------------------------------------------------#

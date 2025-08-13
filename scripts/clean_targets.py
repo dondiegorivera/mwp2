@@ -10,12 +10,14 @@
 #   <out> cleaned parquet
 #   <out>.clean_report.json with caps and drop counts
 
-import argparse, json
+import argparse
+import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 TARGETS = ["target_1d", "target_5d", "target_20d"]
+
 
 def compute_caps(df: pd.DataFrame, train_cutoff: float) -> dict:
     """
@@ -36,6 +38,7 @@ def compute_caps(df: pd.DataFrame, train_cutoff: float) -> dict:
         else:
             caps[col] = None
     return caps
+
 
 def clean_df(df: pd.DataFrame, caps: dict, mode: str):
     """
@@ -69,13 +72,18 @@ def clean_df(df: pd.DataFrame, caps: dict, mode: str):
 
     return df, report
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True, type=Path)
     ap.add_argument("--out", dest="out", required=True, type=Path)
-    ap.add_argument("--train-cutoff", type=float, default=0.8,
-                    help="fraction of earliest time_idx for cap estimation")
-    ap.add_argument("--mode", choices=["drop","clip"], default="drop")
+    ap.add_argument(
+        "--train-cutoff",
+        type=float,
+        default=0.8,
+        help="fraction of earliest time_idx for cap estimation",
+    )
+    ap.add_argument("--mode", choices=["drop", "clip"], default="drop")
     args = ap.parse_args()
 
     df = pd.read_parquet(args.inp)
@@ -105,6 +113,7 @@ def main():
         print("Clipped beyond caps:")
         for k, v in report["clipped"].items():
             print(f"  {k}: {v}")
+
 
 if __name__ == "__main__":
     main()

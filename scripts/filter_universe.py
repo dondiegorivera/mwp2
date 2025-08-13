@@ -14,18 +14,24 @@ import re
 
 # Symbols to exclude (substr matches)
 EXCLUDE_SUBSTRINGS = [
-    "=F",           # futures
-    "-USD", "-EUR", "-USDT",  # common crypto quote suffixes
-    "BTC", "ETH", "DOGE", "SHIB",
+    "=F",  # futures
+    "-USD",
+    "-EUR",
+    "-USDT",  # common crypto quote suffixes
+    "BTC",
+    "ETH",
+    "DOGE",
+    "SHIB",
 ]
 
 # Hard regexes
 EXCLUDE_REGEXES = [
-    r".*=X$",       # Yahoo FX pairs, e.g. EURUSD=X
+    r".*=X$",  # Yahoo FX pairs, e.g. EURUSD=X
 ]
 
 # optional: very volatile names to remove in a first pass
-OPTIONAL_EXCLUDE = {"MARA","RIOT","CLSK"}
+OPTIONAL_EXCLUDE = {"MARA", "RIOT", "CLSK"}
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -38,8 +44,9 @@ def main():
     tmap = pl.read_parquet(args.tickermap)
 
     # id -> symbol (ids as str)
-    id2sym = dict(zip(tmap["ticker_id"].cast(pl.Utf8).to_list(),
-                      tmap["ticker"].to_list()))
+    id2sym = dict(
+        zip(tmap["ticker_id"].cast(pl.Utf8).to_list(), tmap["ticker"].to_list())
+    )
     df["ticker_symbol"] = df["ticker_id"].astype(str).map(id2sym).fillna("UNK")
 
     sym = df["ticker_symbol"].astype(str)
@@ -61,6 +68,7 @@ def main():
     print(f"Removed rows: {int(bad.sum()):,}")
     print(f"Output rows: {len(keep):,}")
     print("Examples removed:", sorted(set(sym[bad]))[:20])
+
 
 if __name__ == "__main__":
     main()
