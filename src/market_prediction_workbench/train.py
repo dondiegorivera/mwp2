@@ -456,25 +456,26 @@ def main(cfg: DictConfig) -> None:
             if idx_df is None:
                 raise RuntimeError("training_dataset.index is not available")
 
-            group_col = (
-                f"__group_id__{group_ids_list[0]}"  # e.g. "__group_id__ticker_id"
-            )
+            group_col = f"__group_id__{group_ids_list[0]}"  # e.g., "__group_id__ticker_id"
             grp_vals = idx_df[group_col].astype(str)
-            counts = grp_vals.value_counts()
+            counts = idx_df[group_col].value_counts()
             mapped_counts = counts.reindex(grp_vals).to_numpy()
+            weights = idx_df[group_col].map(counts).rpow(-1.0).astype(np.float64).values  # 1 / count
             weights_np = (1.0 / mapped_counts).astype("float32")
 
-            sampler = WeightedRandomSampler(
-                weights=torch.from_numpy(weights_np),
-                num_samples=len(weights_np),
-                replacement=True,
-            )
+            sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
 
             train_loader = training_dataset.to_dataloader(
-                sampler=sampler,
-                shuffle=False,  # must be False when sampler is set
-                **train_loader_kwargs,
+                train=True,
+                batch_size=cfg.trainer.batch_size,
+                sampler=sampler,          # <--- use sampler
+                shuffle=False,            # <--- must be False when sampler is set
+                num_workers=...,
+                pin_memory=True,
+                persistent_workers=True if cfg.trainer.num_workers > 0 else False,
+                prefetch_factor=4,
             )
+
             print(
                 f"Using WeightedRandomSampler over {len(counts)} groups for {len(weights_np)} samples."
             )

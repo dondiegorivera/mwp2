@@ -12,7 +12,7 @@ seed: 42
 paths:
   data_dir: "data"
   raw_data_file: "${paths.data_dir}/raw/stock_data.csv"
-  processed_data_file: "${paths.data_dir}/processed/processed_data.parquet"
+  processed_data_file: data/processed/processed_data.eqonly.win.parquet
   log_dir: "experiments"
 
 # NEW: central knobs for splitting & sampler

@@ -291,8 +291,8 @@ def plot_preds(preds, trues, out_dir, ticker_map, sample_tickers, short_tgt_name
     for name in short_tgt_names:
         df_plot[name] = trues.get(f"{name}@h1")
         df_plot[f"p_{name}"] = preds.get(f"{name}@h1")
-        df_plot[f"p_{name}_lower"] = preds.get(f"{name}_lower@h1")
-        df_plot[f"p_{name}_upper"] = preds.get(f"{name}_upper@h1")
+        df_plot[f"p_{name}_lower"] = preds.get(f"{name}_lower_cal@h1", preds.get(f"{name}_lower@h1"))
+        df_plot[f"p_{name}_upper"] = preds.get(f"{name}_upper_cal@h1", preds.get(f"{name}_upper@h1"))
 
     for tk in sample_tickers:
         tid = _safe_ticker_id(ticker_map, tk)
@@ -371,6 +371,86 @@ def save_output(
 
     df.to_csv(out_dir / "predictions.csv", index=False)
     print(f"\nResults written to {out_dir}")
+
+
+def compute_calibration_alphas(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, float]:
+    """
+    Compute per-target alpha from horizon 1 only:
+      alpha = 90th percentile of |resid| / (1.645 * s_hat),
+      where s_hat = (upper - lower) / (2 * 1.645)
+    """
+    alphas = {}
+    for name in short_names:
+        p50 = preds.get(f"{name}@h1")
+        y   = trues.get(f"{name}@h1")
+        lo  = preds.get(f"{name}_lower@h1")
+        hi  = preds.get(f"{name}_upper@h1")
+
+        if p50 is None or y is None or lo is None or hi is None:
+            alphas[name] = float("nan")
+            continue
+
+        s_hat = (hi - lo) / (2.0 * 1.645)
+        denom = 1.645 * s_hat
+        resid = y - p50
+
+        mask = np.isfinite(resid) & np.isfinite(denom) & (denom > 0)
+        if not np.any(mask):
+            alphas[name] = float("nan")
+            continue
+
+        k = np.abs(resid[mask]) / denom[mask]
+        alphas[name] = float(np.nanpercentile(k, 90))
+    return alphas
+
+
+def add_calibrated_intervals(preds: Dict, short_names: List[str], num_horizons: int, alphas: Dict[str, float]) -> None:
+    """
+    Add calibrated intervals as NEW keys:
+      *_lower_cal@h*, *_upper_cal@h*
+    (Original *_lower@h*/*_upper@h* are left untouched.)
+    """
+    for name in short_names:
+        alpha = alphas.get(name, float("nan"))
+        for h in range(1, num_horizons + 1):
+            key_mid = f"{name}@h{h}"
+            key_lo  = f"{name}_lower@h{h}"
+            key_hi  = f"{name}_upper@h{h}"
+            if key_mid not in preds or key_lo not in preds or key_hi not in preds:
+                continue
+
+            mid = preds[key_mid]
+            lo  = preds[key_lo]
+            hi  = preds[key_hi]
+
+            s_hat = (hi - lo) / (2.0 * 1.645)
+
+            if np.isnan(alpha) or alpha <= 0:
+                lo_cal = lo
+                hi_cal = hi
+            else:
+                lo_cal = mid - 1.645 * alpha * s_hat
+                hi_cal = mid + 1.645 * alpha * s_hat
+
+            preds[f"{name}_lower_cal@h{h}"] = lo_cal
+            preds[f"{name}_upper_cal@h{h}"] = hi_cal
+
+
+def evaluate_with_calibrated(preds: Dict, trues: Dict, short_names: List[str], num_horizons: int) -> Dict[str, float]:
+    """
+    Reuse the existing `evaluate()` but temporarily point lower/upper
+    to the calibrated versions for coverage computation.
+    """
+    cal_preds = dict(preds)  # shallow copy
+    for name in short_names:
+        for h in range(1, num_horizons + 1):
+            lo_cal = cal_preds.get(f"{name}_lower_cal@h{h}")
+            hi_cal = cal_preds.get(f"{name}_upper_cal@h{h}")
+            if lo_cal is not None and hi_cal is not None:
+                cal_preds[f"{name}_lower@h{h}"] = lo_cal
+                cal_preds[f"{name}_upper@h{h}"] = hi_cal
+    return evaluate(cal_preds, trues, short_names)
+
 
 
 # -----------------------------------------------------------------------------#
@@ -537,6 +617,30 @@ def main(cfg: DictConfig):
             print(f"{name},{h},{n},{cov:.3f}")
 
     out_dir = Path(cfg.paths.log_dir) / "evaluation" / latest_run.name
+
+    # ---- Calibration (adds *_lower_cal@h*, *_upper_cal@h*; originals untouched) ----
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    alphas = compute_calibration_alphas(preds, trues, short_tgt_names)
+    print("\n--- Calibration α (per target, from h1) ---")
+    for k, v in alphas.items():
+        if np.isfinite(v):
+            print(f"{k}: {v:.3f}")
+        else:
+            print(f"{k}: NaN")
+
+    # add calibrated intervals for all horizons
+    add_calibrated_intervals(preds, short_tgt_names, num_horizons, alphas)
+
+    # evaluate coverage using calibrated bands
+    metrics_cal = evaluate_with_calibrated(preds, trues, short_tgt_names, num_horizons)
+
+    # write extra artifacts
+    with (out_dir / "metrics_calibrated.json").open("w") as fp:
+        json.dump({k: float(v) for k, v in metrics_cal.items()}, fp, indent=2)
+    with (out_dir / "calibration_alphas.json").open("w") as fp:
+        json.dump(alphas, fp, indent=2)
+
     plot_preds(
         preds, trues, out_dir, ticker_map, sample_tickers_for_plots, short_tgt_names
     )
