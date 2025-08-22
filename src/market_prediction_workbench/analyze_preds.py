@@ -139,11 +139,21 @@ def per_target_analysis(df, tgt_name="20d"):
     return d, overall, by_ticker, by_date, alpha
 
 
-# --- Run analyses for 1d, 5d, 20d and dump CSVs next to predictions.csv ---
+def infer_target_shortnames(columns):
+    names = set()
+    for c in columns:
+        if "@h1" in c and ("_lower" not in c and "_upper" not in c and "_cal" not in c):
+            names.add(c.split("@h1")[0])
+    return sorted(names)
+
+# --- Run analyses for present targets and dump CSVs next to predictions.csv ---
 OUT_DIR = preds_csv.parent
 summaries = {}
+present_targets = infer_target_shortnames(preds.columns)
+if not present_targets:
+    present_targets = ["5d"]  # sensible default
 
-for tgt in ["1d", "5d", "20d"]:
+for tgt in present_targets:
     print(f"\nAnalyzing {tgt} …")
     d, overall, by_ticker, by_date, alpha = per_target_analysis(df, tgt_name=tgt)
     summaries[tgt] = {"overall": overall, "alpha_for_90pc": alpha}

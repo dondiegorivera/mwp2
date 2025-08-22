@@ -9,7 +9,7 @@ min_prediction_horizon: 1 # For pytorch-forecasting, prediction length is max_pr
 # Pytorch-forecasting handles targets like ["target_1d", "target_5d", "target_20d"]
 # by having them as separate columns in the input data.
 
-batch_size: 4096
+batch_size: 256
 num_workers: 8 # For DataLoader
 
 # Core structural parameters
@@ -17,9 +17,10 @@ group_ids:
   - "ticker_id"
 time_idx: "time_idx"
 target:
-  - "target_1d"
+#  - "target_1d"
+#  - "target_5d"
+#  - "target_20d"
   - "target_5d"
-  - "target_20d"
 target_quantiles: [0.05, 0.5, 0.95]
 
 # --- Feature Configuration ---

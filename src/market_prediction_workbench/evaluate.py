@@ -19,6 +19,10 @@ from tqdm import tqdm
 
 from market_prediction_workbench.model import GlobalTFT
 
+# >>> PATCH: added import for rank-IC helper
+from scipy.stats import spearmanr
+# <<< PATCH
+
 
 # -----------------------------------------------------------------------------#
 # Helpers                                                                       #
@@ -109,6 +113,63 @@ def _inverse_with_groups(
     return torch.as_tensor(out, dtype=data.dtype, device=data.device)
 
 
+# >>> PATCH: rank-signal helpers (ADD ONLY)
+def _daily_rank_ic_simple(time_idx: np.ndarray, p50: np.ndarray, y: np.ndarray) -> float:
+    """
+    Spearman rank-IC computed cross-sectionally per time index then averaged.
+    Expects de-normalized p50 and true y for horizon 1.
+    """
+    df = pd.DataFrame({"t": time_idx, "p": p50, "y": y})
+    ics = []
+    for _, g in df.groupby("t"):
+        if g["p"].nunique() < 3 or g["y"].nunique() < 3:
+            continue
+        r = spearmanr(g["p"], g["y"]).correlation
+        if np.isfinite(r):
+            ics.append(float(r))
+    return float(np.mean(ics)) if ics else float("nan")
+
+
+def _ls_sharpe_costed(
+    time_idx: np.ndarray,
+    ticker: np.ndarray,
+    p50: np.ndarray,
+    y: np.ndarray,
+    top_q: float = 0.1,
+    cost_bps: float = 10.0,
+) -> float:
+    """
+    Simple daily long/short portfolio:
+      - Each day: long top-q by p50, short bottom-q by p50, equal-weight
+      - Return = mean(y_long) - mean(y_short)
+      - Transaction cost: cost_bps per unit turnover (sum abs(weight change))
+      - Annualize to Sharpe with sqrt(252)
+
+    All inputs should be 1D arrays for horizon-1 and de-normalized.
+    """
+    df = pd.DataFrame({"t": time_idx, "k": ticker, "p": p50, "y": y})
+    rets = []
+    prev_w = {}
+    c = cost_bps * 1e-4
+    for _, g in df.groupby("t"):
+        g = g.sort_values("p")
+        n = len(g)
+        k = max(1, int(n * top_q))
+        short = g.iloc[:k]
+        long = g.iloc[-k:]
+        w = {**{kk: -1.0 / k for kk in short["k"]}, **{kk: 1.0 / k for kk in long["k"]}}
+        keys = set(w) | set(prev_w)
+        turnover = sum(abs(w.get(u, 0.0) - prev_w.get(u, 0.0)) for u in keys)
+        gross = float(long["y"].mean() - short["y"].mean())
+        rets.append(gross - c * turnover)
+        prev_w = w
+    r = np.asarray(rets, dtype=float)
+    if len(r) <= 1 or np.std(r, ddof=1) == 0.0:
+        return float("nan")
+    return float(r.mean() / r.std(ddof=1) * np.sqrt(252.0))
+# <<< PATCH
+
+
 # -----------------------------------------------------------------------------#
 # Inference                                                                    #
 # -----------------------------------------------------------------------------#
@@ -128,7 +189,6 @@ def run_inference(
         if isinstance(cls, dict):
             inv_map = {v: k for k, v in cls.items()}  # value->idx to idx->value
         else:
-            # list/array-like where positions are the encoded ints
             inv_map = {i: str(v) for i, v in enumerate(list(cls))}
 
     preds_norm_list, trues_norm_list = [], []
@@ -155,7 +215,6 @@ def run_inference(
 
             preds_norm_list.append(output_norm.cpu())
             trues_norm_list.append(target_norm.cpu())
-
             groups_all.append(x["groups"].cpu())
 
             encoded = x["groups"][:, 0].cpu().numpy()
@@ -175,9 +234,9 @@ def run_inference(
 
     preds_norm = torch.cat(preds_norm_list, dim=0)  # [B, H, T, Q]
     trues_norm = torch.cat(trues_norm_list, dim=0)  # [B, H, T]
-    groups = torch.cat(groups_all, dim=0)  # [B, G]
+    groups = torch.cat(groups_all, dim=0)           # [B, G]
     tickers = np.array(tickers_all)
-    time_idx = np.concatenate(t_idx_all, axis=0)  # [B, H]
+    time_idx = np.concatenate(t_idx_all, axis=0)    # [B, H]
 
     normalizer = dataset.target_normalizer
 
@@ -191,9 +250,7 @@ def run_inference(
         target_preds_by_q = []
         for q in range(num_quantiles):
             pred_data = preds_norm[:, :, i, q]
-            if isinstance(normalizer, MultiNormalizer) and i < len(
-                normalizer.normalizers
-            ):
+            if isinstance(normalizer, MultiNormalizer) and i < len(normalizer.normalizers):
                 norm = normalizer.normalizers[i]
             else:
                 norm = normalizer
@@ -201,24 +258,44 @@ def run_inference(
             target_preds_by_q.append(decoded)
         preds_dec.append(torch.stack(target_preds_by_q, dim=-1))  # [B,H,Q]
     preds_dec = torch.stack(preds_dec, dim=2)  # [B,H,T,Q]
-
     trues_dec = _inverse_with_groups(trues_norm, normalizer, groups)  # [B,H,T]
+
+    # --- pick indices for lower/median/upper robustly ---
+    # Prefer the model's saved quantiles if available AND matches the last-dim size.
+    q_list = getattr(getattr(model, "model", model).loss, "quantiles", None)
+    q_vals = None
+    if isinstance(q_list, (list, tuple, np.ndarray)) and len(q_list) == num_quantiles:
+        try:
+            q_vals = np.array([float(q) for q in q_list], dtype=float)
+        except Exception:
+            q_vals = None
+
+    if q_vals is not None:
+        def _nearest_idx(target: float) -> int:
+            return int(np.argmin(np.abs(q_vals - target)))
+        lo_idx = _nearest_idx(0.05)
+        mid_idx = _nearest_idx(0.50)
+        hi_idx = _nearest_idx(0.95)
+    else:
+        # Fallback: use extremes for 90% band and the middle for median
+        lo_idx = 0
+        hi_idx = num_quantiles - 1
+        mid_idx = num_quantiles // 2
 
     pred_dict, true_dict = {}, {"ticker": tickers}
     short_names = [t.replace("target_", "") for t in _cfg_list(cfg.data.target)]
-
-    # Keep h1 time index for plotting
-    true_dict["time_idx_h1"] = time_idx[:, 0]
+    true_dict["time_idx_h1"] = time_idx[:, 0]  # keep h1 time index for plotting
 
     for i, name in enumerate(short_names):
         for h in range(num_horizons):
             suffix = f"@h{h+1}"
-            pred_dict[f"{name}_lower{suffix}"] = preds_dec[:, h, i, 0].numpy()
-            pred_dict[f"{name}{suffix}"] = preds_dec[:, h, i, 1].numpy()
-            pred_dict[f"{name}_upper{suffix}"] = preds_dec[:, h, i, 2].numpy()
+            pred_dict[f"{name}_lower{suffix}"] = preds_dec[:, h, i, lo_idx].numpy()
+            pred_dict[f"{name}{suffix}"] = preds_dec[:, h, i, mid_idx].numpy()
+            pred_dict[f"{name}_upper{suffix}"] = preds_dec[:, h, i, hi_idx].numpy()
             true_dict[f"{name}{suffix}"] = trues_dec[:, h, i].numpy()
 
     return pred_dict, true_dict, short_names, num_horizons
+
 
 
 # -----------------------------------------------------------------------------#
@@ -353,18 +430,32 @@ def save_output(
     ticker_map: pl.DataFrame | None = None,
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / "metrics.json").open("w") as fp:
-        json.dump({k: float(v) for k, v in metrics.items()}, fp, indent=2)
 
-    df = pd.DataFrame({**trues, **preds})
+    # --- Build DataFrame with predictions first, then append *_true columns explicitly ---
+    df = pd.DataFrame(preds).copy()
+
+    # Ensure we carry identifiers from trues (ticker + h1 time index)
+    if "ticker" in trues and "ticker" not in df:
+        df["ticker"] = trues["ticker"]
+    if "time_idx_h1" in trues and "time_idx_h1" not in df:
+        df["time_idx_h1"] = trues["time_idx_h1"]
+
+    # Add explicit *_true columns for every true series we have
+    for k, v in trues.items():
+        if k in {"ticker", "time_idx_h1"}:
+            continue
+        # If this true key collides with a pred key (e.g., "1d@h1"),
+        # write it under "<key>_true" to avoid ambiguity.
+        col = f"{k}_true" if k in df.columns else k
+        df[col] = v
 
     # Optional: add human-readable symbol
     if (
         ticker_map is not None
         and "ticker_id" in ticker_map.columns
         and "ticker" in ticker_map.columns
+        and "ticker" in df.columns
     ):
-        # build id->symbol map (ids as strings to match our 'ticker' column)
         id_to_symbol = dict(
             zip(
                 ticker_map["ticker_id"].cast(pl.Utf8).to_list(),
@@ -373,6 +464,9 @@ def save_output(
         )
         df["ticker_symbol"] = df["ticker"].astype(str).map(id_to_symbol).fillna("UNK")
 
+    # Write metrics and predictions
+    with (out_dir / "metrics.json").open("w") as fp:
+        json.dump({k: float(v) for k, v in metrics.items()}, fp, indent=2)
     df.to_csv(out_dir / "predictions.csv", index=False)
     print(f"\nResults written to {out_dir}")
 
@@ -495,7 +589,7 @@ def main(cfg: DictConfig):
     print("Loading full processed dataset to match model architecture...")
     df_full = pd.read_parquet(parquet_path)
 
-    # load dataset parameters from checkpoint
+    # load dataset parameters from checkpoint (for encoders/normalizers and known groups)
     cp = torch.load(best, map_location="cpu", weights_only=False)
     ds_params = cp["hyper_parameters"]["timeseries_dataset_params"]
 
@@ -527,7 +621,6 @@ def main(cfg: DictConfig):
     # Filter evaluation data to ONLY tickers known by the trained encoder to avoid 'unknown' issues
     group_id_col = _cfg_list(ds_params.get("group_ids", []))[0]
     enc = full_dataset.categorical_encoders[group_id_col]
-    known_values: set[str]
     if hasattr(enc, "classes_"):
         if isinstance(enc.classes_, dict):
             known_values = set(str(k) for k in enc.classes_.keys())
@@ -566,18 +659,28 @@ def main(cfg: DictConfig):
         eval_df = df_full[df_full[group_id_col].astype(str).isin(set(keep_ids))].copy()
         sample_tickers_for_plots = want
 
-    # Build eval dataset from filtered DataFrame using the SAME parameters
-    eval_dataset = TimeSeriesDataSet.from_parameters(ds_params, eval_df, predict=False)
-    print(f"Evaluation dataset has {len(eval_dataset)} samples after filtering.")
-
-    # load model
-    model = GlobalTFT.load_from_checkpoint(
-        best, timeseries_dataset=full_dataset, map_location="cpu"
-    )
+    # load model (pass a real dataset so __init__ doesn't try to rebuild from empty df)
+    model = GlobalTFT.load_from_checkpoint(best, timeseries_dataset=full_dataset)
+    tft = model.model  # inner PF TFT
+    saved_ts_params = model.hparams["timeseries_dataset_params"]
+    quantiles = getattr(tft.loss, "quantiles", [0.5])
     print("Model loaded successfully.")
 
-    # dataloader
-    loader = eval_dataset.to_dataloader(
+    # Build eval dataset using the SAME encoders/lengths/groups as training
+    #eval_ds = TimeSeriesDataSet.from_parameters(saved_ts_params, eval_df, predict=True)
+
+    # Build eval dataset by cloning from the full_dataset (safer than from_parameters).
+    eval_ds = TimeSeriesDataSet.from_dataset(
+        full_dataset,
+        eval_df,
+        stop_randomization=True,
+        predict=False,
+    )
+
+    print(f"Evaluation dataset has {len(eval_ds)} samples after filtering.")
+
+    # dataloader from the eval dataset
+    loader = eval_ds.to_dataloader(
         train=False,
         batch_size=cfg.evaluate.batch_size,
         shuffle=False,
@@ -585,14 +688,37 @@ def main(cfg: DictConfig):
     )
     print("Created dataloader for evaluation.")
 
+    # Run inference (use eval_ds for consistent normalizer/encoders)
     preds, trues, short_tgt_names, num_horizons = run_inference(
-        model, loader, cfg, full_dataset
+        model, loader, cfg, eval_ds
     )
     metrics = evaluate(preds, trues, short_tgt_names)
 
     print("\n--- Metrics ---")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
+
+    # >>> PATCH: add rank-signal metrics (h1)
+    print("\n--- Rank-signal metrics (h1) ---")
+    # time index and ticker for horizon-1
+    ti_h1 = trues.get("time_idx_h1")
+    tk = trues.get("ticker")
+    for name in short_tgt_names:
+        base = f"{name}@h1"
+        if base in preds and base in trues and ti_h1 is not None and tk is not None:
+            p50 = preds[base]
+            y = trues[base]
+            m = np.isfinite(p50) & np.isfinite(y) & np.isfinite(ti_h1)
+            if np.any(m):
+                ic = _daily_rank_ic_simple(time_idx=ti_h1[m], p50=p50[m], y=y[m])
+                sh = _ls_sharpe_costed(time_idx=ti_h1[m], ticker=np.array(tk)[m],
+                                       p50=p50[m], y=y[m], top_q=0.1, cost_bps=10.0)
+            else:
+                ic, sh = float("nan"), float("nan")
+            print(f"{name}: rankIC={ic:.4f}, LS10 Sharpe (10bps)={sh:.3f}")
+            metrics[f"{name}_rank_ic@h1"] = float(ic) if np.isfinite(ic) else float("nan")
+            metrics[f"{name}_ls10_sharpe_costed@h1"] = float(sh) if np.isfinite(sh) else float("nan")
+    # <<< PATCH
 
     # Coverage table
     def _horizons_from(preds_dict):

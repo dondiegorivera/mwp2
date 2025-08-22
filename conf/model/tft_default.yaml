@@ -2,15 +2,20 @@
 _target_: market_prediction_workbench.model.GlobalTFT # Changed this line
 
 # Parameters for GlobalTFT constructor
-learning_rate: 1e-3 # Added
-weight_decay: 1e-5  # Added
+learning_rate: 7.5e-4 # Added
+weight_decay: 1e-4  # Added
 
 # Hyperparameters for the underlying TemporalFusionTransformer
 # These will be filtered into model_specific_params in train.py
-hidden_size: 128
+hidden_size: 384
 lstm_layers: 2
-dropout: 0.2
+dropout: 0.1
+attention_head_size: 6
 loss:
   _target_: pytorch_forecasting.metrics.QuantileLoss
-  quantiles: [0.05, 0.5, 0.95]
+  quantiles: [0.05, 0.25, 0.5, 0.75, 0.95]
 # embedding_sizes will be calculated in train.py and added to model_specific_params
+
+#trainer:
+#  accumulate_grad_batches: 4   # safe default; you can bump to 8 if needed
+#  precision: 32-true           # keep FP32 for now to avoid the half-mask overflow
