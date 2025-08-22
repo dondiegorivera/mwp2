@@ -146,6 +146,7 @@ def infer_target_shortnames(columns):
             names.add(c.split("@h1")[0])
     return sorted(names)
 
+
 # --- Run analyses for present targets and dump CSVs next to predictions.csv ---
 OUT_DIR = preds_csv.parent
 summaries = {}

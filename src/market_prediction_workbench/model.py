@@ -13,6 +13,7 @@ import pandas as pd
 from omegaconf import ListConfig
 import math
 
+
 class TemporalFusionTransformerWithDevice(TemporalFusionTransformer):
     def get_attention_mask(self, *args, **kwargs) -> torch.Tensor:
         """
@@ -56,9 +57,13 @@ class TemporalFusionTransformerWithDevice(TemporalFusionTransformer):
             L_dec = L_dec or _as_len(dec_pos)
 
         if L_enc is None or L_dec is None:
-            raise RuntimeError(f"Could not infer encoder/decoder lengths (args={args}, kwargs={kwargs}).")
+            raise RuntimeError(
+                f"Could not infer encoder/decoder lengths (args={args}, kwargs={kwargs})."
+            )
 
-        dec_mask = torch.triu(torch.ones((L_dec, L_dec), dtype=torch.bool, device=dev), diagonal=1)
+        dec_mask = torch.triu(
+            torch.ones((L_dec, L_dec), dtype=torch.bool, device=dev), diagonal=1
+        )
         dec_mask = dec_mask.unsqueeze(0).expand(bs, L_dec, L_dec)
         enc_mask = torch.zeros((L_dec, L_enc), dtype=torch.bool, device=dev)
         enc_mask = enc_mask.unsqueeze(0).expand(bs, L_dec, L_enc)
@@ -136,7 +141,9 @@ class GlobalTFT(pl.LightningModule):
         # If no output_size provided, infer from the number of quantiles and number of targets.
         if "output_size" not in model_specific_params:
             n_targets = len(ds.target_names)
-            model_specific_params["output_size"] = qn if n_targets == 1 else [qn] * n_targets
+            model_specific_params["output_size"] = (
+                qn if n_targets == 1 else [qn] * n_targets
+            )
 
         # Clean params so nn.Modules are not stored in hparams
         init_model_params_copy = model_specific_params.copy()
@@ -154,7 +161,9 @@ class GlobalTFT(pl.LightningModule):
                 "model_specific_params": cleaned_model_params,
                 "timeseries_dataset_params": ts_params,
                 "lr_schedule": lr_schedule or {},
-                "steps_per_epoch": int(steps_per_epoch) if steps_per_epoch is not None else None,
+                "steps_per_epoch": (
+                    int(steps_per_epoch) if steps_per_epoch is not None else None
+                ),
                 "max_epochs": int(max_epochs) if max_epochs is not None else None,
             }
         )
@@ -172,7 +181,10 @@ class GlobalTFT(pl.LightningModule):
         current_loss_module = self.model.loss
         if isinstance(current_loss_module, MultiLoss):
             for metric in current_loss_module.metrics:
-                if hasattr(metric, "max_prediction_length") and metric.max_prediction_length is None:
+                if (
+                    hasattr(metric, "max_prediction_length")
+                    and metric.max_prediction_length is None
+                ):
                     metric.max_prediction_length = dataset_max_pred_len
                     print(
                         f"DEBUG GlobalTFT.__init__: Set metric {type(metric).__name__}.max_prediction_length "
@@ -216,11 +228,19 @@ class GlobalTFT(pl.LightningModule):
                     and hasattr(data_element.item(), "to")
                     and hasattr(data_element.item(), "device")
                 ):
-                    return data_element.item().to(device=self.device, dtype=torch.float32)
+                    return data_element.item().to(
+                        device=self.device, dtype=torch.float32
+                    )
                 processed_list = [self._process_input_data(el) for el in data_element]
-                return torch.stack(processed_list) if processed_list else torch.empty(0, dtype=torch.float32, device=self.device)
+                return (
+                    torch.stack(processed_list)
+                    if processed_list
+                    else torch.empty(0, dtype=torch.float32, device=self.device)
+                )
             else:
-                return torch.from_numpy(data_element).to(device=self.device, dtype=torch.float32)
+                return torch.from_numpy(data_element).to(
+                    device=self.device, dtype=torch.float32
+                )
         elif isinstance(data_element, (list, tuple)):
             if not data_element:
                 return torch.empty(0, dtype=torch.float32, device=self.device)
@@ -228,7 +248,9 @@ class GlobalTFT(pl.LightningModule):
             try:
                 return torch.stack(processed)
             except RuntimeError:
-                return torch.tensor(data_element, dtype=torch.float32, device=self.device)
+                return torch.tensor(
+                    data_element, dtype=torch.float32, device=self.device
+                )
         else:
             return torch.tensor(data_element, dtype=torch.float32, device=self.device)
 
@@ -268,13 +290,20 @@ class GlobalTFT(pl.LightningModule):
         sch_cfg = self.hparams.get("lr_schedule", {}) or {}
         sch_type = str(sch_cfg.get("type", "one_cycle")).lower()
         warmup_frac = float(sch_cfg.get("warmup_frac", 0.1))
-        total_steps = int(self.hparams.get("steps_per_epoch", 100)) * int(self.hparams.get("max_epochs", 10))
+        total_steps = int(self.hparams.get("steps_per_epoch", 100)) * int(
+            self.hparams.get("max_epochs", 10)
+        )
         warmup_steps = max(1, int(total_steps * warmup_frac))
 
         if sch_type == "none":
             return {"optimizer": optimizer}
 
-        from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, LambdaLR, SequentialLR
+        from torch.optim.lr_scheduler import (
+            OneCycleLR,
+            CosineAnnealingLR,
+            LambdaLR,
+            SequentialLR,
+        )
 
         steps_per_epoch = self.hparams.get("steps_per_epoch")
         max_epochs = self.hparams.get("max_epochs")
@@ -297,16 +326,23 @@ class GlobalTFT(pl.LightningModule):
                 div_factor=25.0,
                 final_div_factor=1e3,
             )
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": sched, "interval": "step"},
+            }
 
         if sch_type == "cosine_warmup":
+
             def lr_lambda(step):
                 if step < warmup_steps:
                     return float(step + 1) / warmup_steps
                 # cosine decay from 1 -> 0 (eta_min handled by optimizer if you prefer)
                 progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))
                 return 0.5 * (1.0 + math.cos(math.pi * progress))
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda=lr_lambda
+            )
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {"scheduler": scheduler, "interval": "step"},

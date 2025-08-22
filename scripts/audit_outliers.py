@@ -97,10 +97,9 @@ def join_truth(preds: pd.DataFrame, proc: pd.DataFrame | None) -> pd.DataFrame:
         left_on=["ticker", "time_idx_h1"],
         right_on=["ticker_id", "time_idx"],
         how="left",
-        suffixes=("","_proc")
+        suffixes=("", "_proc"),
     )
     return mm
-
 
 
 def compute_metrics(df: pd.DataFrame, name: str) -> dict:
@@ -114,8 +113,14 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
     yhat = df[f"{name}@h1"].values
     mask = np.isfinite(y) & np.isfinite(yhat)
     if mask.sum() == 0:
-        return {"n": 0, "mae": np.nan, "rmse": np.nan, "p99_abs_resid": np.nan,
-                "coverage_90": np.nan, "coverage_90_cal": np.nan}
+        return {
+            "n": 0,
+            "mae": np.nan,
+            "rmse": np.nan,
+            "p99_abs_resid": np.nan,
+            "coverage_90": np.nan,
+            "coverage_90_cal": np.nan,
+        }
 
     resid = yhat[mask] - y[mask]
     mae = float(np.mean(np.abs(resid)))
@@ -136,45 +141,69 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
         lo_c, hi_c = lo_c.values[mask], hi_c.values[mask]
         cov_cal = float(np.mean((y[mask] >= lo_c) & (y[mask] <= hi_c)))  # y in [lo,hi]
 
-    return {"n": int(mask.sum()), "mae": mae, "rmse": rmse,
-            "p99_abs_resid": p99, "coverage_90": cov, "coverage_90_cal": cov_cal}
-
+    return {
+        "n": int(mask.sum()),
+        "mae": mae,
+        "rmse": rmse,
+        "p99_abs_resid": p99,
+        "coverage_90": cov,
+        "coverage_90_cal": cov_cal,
+    }
 
 
 def write_outliers(df: pd.DataFrame, name: str, out_dir: Path, topk: int):
     df = df.copy()
-    true_col = f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    true_col = (
+        f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    )
 
     df[f"{name}_resid"] = df[f"{name}@h1"] - df[true_col]
     df[f"{name}_abs_resid"] = df[f"{name}_resid"].abs()
 
-    cols = ["ticker_symbol","ticker","time_idx_h1","date"] if "date" in df.columns else ["ticker_symbol","ticker","time_idx_h1"]
+    cols = (
+        ["ticker_symbol", "ticker", "time_idx_h1", "date"]
+        if "date" in df.columns
+        else ["ticker_symbol", "ticker", "time_idx_h1"]
+    )
     cols = [c for c in cols if c in df.columns]
-    cols += [true_col, f"{name}@h1",
-             f"{name}_lower@h1", f"{name}_upper@h1",
-             f"{name}_lower_cal@h1", f"{name}_upper_cal@h1",
-             f"{name}_resid", f"{name}_abs_resid"]
+    cols += [
+        true_col,
+        f"{name}@h1",
+        f"{name}_lower@h1",
+        f"{name}_upper@h1",
+        f"{name}_lower_cal@h1",
+        f"{name}_upper_cal@h1",
+        f"{name}_resid",
+        f"{name}_abs_resid",
+    ]
     cols = [c for c in cols if c in df.columns]
 
     out = df.sort_values(f"{name}_abs_resid", ascending=False).head(topk)[cols]
     out.to_csv(out_dir / f"outliers_{name}.csv", index=False)
 
-    g = df.groupby("ticker_symbol" if "ticker_symbol" in df.columns else "ticker")[f"{name}_resid"]
-    per_ticker = pd.DataFrame({
-        "n": g.size(),
-        "mae": g.apply(lambda s: s.abs().mean()),
-        "rmse": g.apply(lambda s: np.sqrt(np.mean(s**2)))
-    }).sort_values("mae")
+    g = df.groupby("ticker_symbol" if "ticker_symbol" in df.columns else "ticker")[
+        f"{name}_resid"
+    ]
+    per_ticker = pd.DataFrame(
+        {
+            "n": g.size(),
+            "mae": g.apply(lambda s: s.abs().mean()),
+            "rmse": g.apply(lambda s: np.sqrt(np.mean(s**2))),
+        }
+    ).sort_values("mae")
     per_ticker.to_csv(out_dir / f"per_ticker_{name}.csv")
 
+
 def plot_hist(df: pd.DataFrame, name: str, out_dir: Path):
-    true_col = f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    true_col = (
+        f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    )
     if not {true_col, f"{name}@h1"}.issubset(df.columns):
         return
     resid = (df[f"{name}@h1"] - df[true_col]).dropna().values
     if resid.size == 0:
         return
-    plt.figure(figsize=(6,4))
+    plt.figure(figsize=(6, 4))
     plt.hist(resid, bins=200)
     plt.title(f"Residuals histogram – {name}")
     plt.xlabel("yhat - y")
@@ -212,7 +241,9 @@ def main():
         tgt_col = f"target_{name}"
         true_col = f"{name}@h1_true"
         if (true_col not in df.columns) and (tgt_col not in df.columns):
-            print(f"Warning: truth missing for '{name}' (neither '{true_col}' nor '{tgt_col}') – skipping.")
+            print(
+                f"Warning: truth missing for '{name}' (neither '{true_col}' nor '{tgt_col}') – skipping."
+            )
             continue
         metrics = compute_metrics(df, name)
         summary[name] = metrics

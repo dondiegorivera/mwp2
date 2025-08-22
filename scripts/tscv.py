@@ -7,10 +7,13 @@
 # This will run 5 folds with non-overlapping validation windows at the end of the timeline,
 # training on all data before the val window start minus an embargo.
 
-import argparse, subprocess, sys
+import argparse
+import subprocess
+import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -30,21 +33,24 @@ def main():
 
     # carve out last K slices as validation windows
     K = int(args.folds)
-    cuts = np.linspace(int(len(dates)*0.5), len(dates), K+1, dtype=int)  # use 2nd half for CV windows
-    fold_ranges = [(dates[cuts[i]], dates[cuts[i+1]-1]) for i in range(K)]
+    cuts = np.linspace(
+        int(len(dates) * 0.5), len(dates), K + 1, dtype=int
+    )  # use 2nd half for CV windows
+    fold_ranges = [(dates[cuts[i]], dates[cuts[i + 1] - 1]) for i in range(K)]
 
     print("CV windows:")
-    for i,(a,b) in enumerate(fold_ranges,1):
+    for i, (a, b) in enumerate(fold_ranges, 1):
         print(f"  Fold {i}: val ∈ [{a.date()} .. {b.date()}]")
 
-    for i,(vstart,vend) in enumerate(fold_ranges,1):
+    for i, (vstart, vend) in enumerate(fold_ranges, 1):
         cutoff = vstart - pd.Timedelta(days=args.embargo)
         exp_id = f"cv5_fold{i}"
         cmd = [
-            sys.executable, "src/market_prediction_workbench/train.py",
+            sys.executable,
+            "src/market_prediction_workbench/train.py",
             f"experiment_id={exp_id}",
             f"trainer.epochs={args.epochs}",
-            f"data.split.use_date_split=true",
+            "data.split.use_date_split=true",
             f"data.split.cutoff_date={cutoff.date()}",
             f"data.split.val_end_date={vend.date()}",
             f"data.split.embargo_days={args.embargo}",
@@ -56,6 +62,7 @@ def main():
             sys.exit(rc)
 
     print("\nAll folds finished.")
+
 
 if __name__ == "__main__":
     main()

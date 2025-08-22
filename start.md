@@ -64,5 +64,3 @@ poetry run python scripts/audit_outliers.py \
   --data-parquet data/processed/processed_data.parquet \
   --ticker-map data/processed/ticker_map.parquet \
   --topk 200
-
-

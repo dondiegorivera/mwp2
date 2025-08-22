@@ -19,7 +19,11 @@ from torch.utils.data import DataLoader
 from scipy.stats import spearmanr
 
 # ✅ Use pytorch_lightning callbacks
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    LearningRateMonitor,
+)
 
 from market_prediction_workbench.model import GlobalTFT
 
@@ -70,16 +74,14 @@ def _ensure_pf_ready(df: pd.DataFrame, cfg) -> pd.DataFrame:
 
     if "sector_id" in missing and ("industry" in df.columns or "sector" in df.columns):
         if "industry" in df.columns:
-            smap = (
-                _load_map_df(smap_path_1, "industry", "sector_id")
-                or _load_map_df(smap_path_2, "industry", "sector_id")
+            smap = _load_map_df(smap_path_1, "industry", "sector_id") or _load_map_df(
+                smap_path_2, "industry", "sector_id"
             )
             if smap is not None:
                 df = df.merge(smap, on="industry", how="left")
         elif "sector" in df.columns:
-            smap = (
-                _load_map_df(smap_path_2, "sector", "sector_id")
-                or _load_map_df(smap_path_1, "sector", "sector_id")
+            smap = _load_map_df(smap_path_2, "sector", "sector_id") or _load_map_df(
+                smap_path_1, "sector", "sector_id"
             )
             if smap is not None:
                 df = df.merge(smap, on="sector", how="left")
@@ -93,7 +95,11 @@ def _ensure_pf_ready(df: pd.DataFrame, cfg) -> pd.DataFrame:
             raise KeyError("Need 'ticker_id' or 'ticker' to build it; neither present.")
 
     if "sector_id" not in df.columns:
-        key = "industry" if "industry" in df.columns else ("sector" if "sector" in df.columns else None)
+        key = (
+            "industry"
+            if "industry" in df.columns
+            else ("sector" if "sector" in df.columns else None)
+        )
         if key is not None:
             codes, _ = pd.factorize(df[key])
             df["sector_id"] = codes.astype(np.int32)
@@ -141,6 +147,7 @@ def _with_context_for_val(
 
 # -------------------------- helpers --------------------------
 
+
 def _cfg_list(val):
     if val is None:
         return []
@@ -158,10 +165,14 @@ def _ensure_dt(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _inverse_with_groups(data: torch.Tensor, normalizer, groups: torch.Tensor) -> torch.Tensor:
+def _inverse_with_groups(
+    data: torch.Tensor, normalizer, groups: torch.Tensor
+) -> torch.Tensor:
     if isinstance(normalizer, GroupNormalizer):
         g = groups[:, 0].cpu().numpy()  # group id index
-        scale = torch.as_tensor(normalizer.get_parameters(g), dtype=data.dtype, device=data.device)
+        scale = torch.as_tensor(
+            normalizer.get_parameters(g), dtype=data.dtype, device=data.device
+        )
         loc, sigm = scale[:, 0], scale[:, 1]
         while loc.dim() < data.dim():
             loc = loc.unsqueeze(1)
@@ -178,15 +189,19 @@ def _inverse_with_groups(data: torch.Tensor, normalizer, groups: torch.Tensor) -
     return torch.as_tensor(out, dtype=data.dtype, device=data.device)
 
 
-def _build_folds(unique_dates: List[pd.Timestamp], n_folds: int, val_days: int, embargo_days: int) -> List[Dict]:
+def _build_folds(
+    unique_dates: List[pd.Timestamp], n_folds: int, val_days: int, embargo_days: int
+) -> List[Dict]:
     """
     Expanding train, fixed-length validation; step = val_days.
     """
     T = len(unique_dates)
     if T < (val_days + embargo_days + 200):
-        raise RuntimeError("Not enough dates to build folds with the requested settings.")
+        raise RuntimeError(
+            "Not enough dates to build folds with the requested settings."
+        )
 
-    folds = [];
+    folds = []
     for i in range(n_folds):
         val_end_idx = T - 1 - (n_folds - 1 - i) * val_days
         val_start_idx = val_end_idx - (val_days - 1)
@@ -207,18 +222,22 @@ def _build_folds(unique_dates: List[pd.Timestamp], n_folds: int, val_days: int, 
 def _make_datasets(cfg, df_train: pd.DataFrame, df_val: pd.DataFrame, target_col: str):
     # Ensure required cols & dtypes
     df_train = _ensure_pf_ready(df_train, cfg)
-    df_val   = _ensure_pf_ready(df_val, cfg)
+    df_val = _ensure_pf_ready(df_val, cfg)
 
     group_id_col = cfg.data.group_ids[0]
     time_idx_col = cfg.data.time_idx
 
     # Sort within group by time
     df_train = df_train.sort_values([group_id_col, time_idx_col])
-    df_val   = df_val.sort_values([group_id_col, time_idx_col])
+    df_val = df_val.sort_values([group_id_col, time_idx_col])
 
     # Some folds might miss a static categorical; only keep those present in BOTH
     global_static_cats = list(getattr(cfg.data, "static_categoricals", []))
-    local_static_cats = [c for c in global_static_cats if (c in df_train.columns) and (c in df_val.columns)]
+    local_static_cats = [
+        c
+        for c in global_static_cats
+        if (c in df_train.columns) and (c in df_val.columns)
+    ]
     if missing := [c for c in global_static_cats if c not in local_static_cats]:
         print(f"[warn] dropping missing static_categoricals for this fold: {missing}")
 
@@ -232,26 +251,24 @@ def _make_datasets(cfg, df_train: pd.DataFrame, df_val: pd.DataFrame, target_col
         time_idx=time_idx_col,
         target=target_col,
         group_ids=cfg.data.group_ids,
-
         static_categoricals=local_static_cats,
         static_reals=getattr(cfg.data, "static_reals", []),
-
-        time_varying_known_categoricals=getattr(cfg.data, "time_varying_known_categoricals", []),
+        time_varying_known_categoricals=getattr(
+            cfg.data, "time_varying_known_categoricals", []
+        ),
         time_varying_known_reals=getattr(cfg.data, "time_varying_known_reals", []),
-        time_varying_unknown_categoricals=getattr(cfg.data, "time_varying_unknown_categoricals", []),
+        time_varying_unknown_categoricals=getattr(
+            cfg.data, "time_varying_unknown_categoricals", []
+        ),
         time_varying_unknown_reals=getattr(cfg.data, "time_varying_unknown_reals", []),
-
         max_encoder_length=max_enc,
-        min_encoder_length=min_enc,                        # ✅ loosen minimum
+        min_encoder_length=min_enc,  # ✅ loosen minimum
         max_prediction_length=cfg.data.max_prediction_horizon,
-
         target_normalizer=GroupNormalizer(groups=cfg.data.group_ids),
-
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
-
-        allow_missing_timesteps=True,                      # ✅ tolerate gaps
+        allow_missing_timesteps=True,  # ✅ tolerate gaps
     )
 
     # --- VALIDATION DATASET WITH CONTEXT ---
@@ -281,7 +298,9 @@ def _make_datasets(cfg, df_train: pd.DataFrame, df_val: pd.DataFrame, target_col
     return train_ds, val_ds
 
 
-def _loader(ds: TimeSeriesDataSet, batch_size: int, train: bool, num_workers: int) -> DataLoader:
+def _loader(
+    ds: TimeSeriesDataSet, batch_size: int, train: bool, num_workers: int
+) -> DataLoader:
     return ds.to_dataloader(
         train=train,
         batch_size=batch_size,
@@ -291,7 +310,12 @@ def _loader(ds: TimeSeriesDataSet, batch_size: int, train: bool, num_workers: in
     )
 
 
-def _fit_one_fold(cfg: DictConfig, train_ds: TimeSeriesDataSet, val_ds: TimeSeriesDataSet, outdir: Path) -> GlobalTFT:
+def _fit_one_fold(
+    cfg: DictConfig,
+    train_ds: TimeSeriesDataSet,
+    val_ds: TimeSeriesDataSet,
+    outdir: Path,
+) -> GlobalTFT:
     bs = int(cfg.trainer.batch_size)
     nw = int(cfg.trainer.num_workers)
     train_loader = _loader(train_ds, bs, True, nw)
@@ -316,7 +340,9 @@ def _fit_one_fold(cfg: DictConfig, train_ds: TimeSeriesDataSet, val_ds: TimeSeri
         weight_decay=float(cfg.model.weight_decay),
         timeseries_dataset=train_ds,
         timeseries_dataset_params=None,
-        lr_schedule=OmegaConf.to_container(getattr(cfg.trainer, "lr_schedule", {}), resolve=True),
+        lr_schedule=OmegaConf.to_container(
+            getattr(cfg.trainer, "lr_schedule", {}), resolve=True
+        ),
         steps_per_epoch=steps_per_epoch,
         max_epochs=int(cfg.trainer.max_epochs),
     )
@@ -346,14 +372,20 @@ def _fit_one_fold(cfg: DictConfig, train_ds: TimeSeriesDataSet, val_ds: TimeSeri
     # ✅ Only add LR monitor if a logger is enabled
     if logger:
         lr_mon = LearningRateMonitor(
-            logging_interval=str(cfg.trainer.get("lr_monitor_logging_interval", "epoch"))
+            logging_interval=str(
+                cfg.trainer.get("lr_monitor_logging_interval", "epoch")
+            )
         )
         callbacks.append(lr_mon)
 
     trainer = pl.Trainer(
         max_epochs=int(cfg.trainer.max_epochs),
         accelerator=str(cfg.trainer.accelerator),
-        devices=(cfg.trainer.devices if str(cfg.trainer.devices).lower() != "auto" else "auto"),
+        devices=(
+            cfg.trainer.devices
+            if str(cfg.trainer.devices).lower() != "auto"
+            else "auto"
+        ),
         callbacks=callbacks,
         logger=logger,
         gradient_clip_val=float(cfg.trainer.get("gradient_clip_val", 0.5)),
@@ -369,11 +401,15 @@ def _fit_one_fold(cfg: DictConfig, train_ds: TimeSeriesDataSet, val_ds: TimeSeri
 
 
 @torch.no_grad()
-def _predict_decode(model: GlobalTFT, ds: TimeSeriesDataSet, loader: DataLoader, target_col: str):
+def _predict_decode(
+    model: GlobalTFT, ds: TimeSeriesDataSet, loader: DataLoader, target_col: str
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
     preds_norm, trues_norm, groups_all, tickers, t_idx = [], [], [], [], []
-    decoder = ds.categorical_encoders[_cfg_list(model.hparams["timeseries_dataset_params"]["group_ids"])[0]]
+    decoder = ds.categorical_encoders[
+        _cfg_list(model.hparams["timeseries_dataset_params"]["group_ids"])[0]
+    ]
 
     for x, y in loader:
         x = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in x.items()}
@@ -396,9 +432,9 @@ def _predict_decode(model: GlobalTFT, ds: TimeSeriesDataSet, loader: DataLoader,
 
     preds_norm = torch.cat(preds_norm, dim=0)  # [B,H,Q]
     trues_norm = torch.cat(trues_norm, dim=0)  # [B,H]
-    groups = torch.cat(groups_all, dim=0)      # [B,G]
+    groups = torch.cat(groups_all, dim=0)  # [B,G]
     tickers = np.array(tickers)
-    time_idx = np.concatenate(t_idx, axis=0)   # [B]
+    time_idx = np.concatenate(t_idx, axis=0)  # [B]
 
     normalizer = ds.target_normalizer
     Q = preds_norm.shape[-1]
@@ -415,8 +451,10 @@ def _predict_decode(model: GlobalTFT, ds: TimeSeriesDataSet, loader: DataLoader,
         q_hi = p50
     else:
         quantiles = getattr(model.model.loss, "quantiles", [0.5])
+
         def _nearest(qs, target):
             return int(np.argmin([abs(float(q) - target) for q in qs]))
+
         i50 = _nearest(quantiles, 0.5)
         ilo = _nearest(quantiles, 0.05)
         ihi = _nearest(quantiles, 0.95)
@@ -425,24 +463,39 @@ def _predict_decode(model: GlobalTFT, ds: TimeSeriesDataSet, loader: DataLoader,
         q_hi = preds_dec[:, 0, ihi]
 
     return dict(
-        ticker=tickers, time_idx=time_idx,
-        y_true=y_true, p50=p50, q_lo=q_lo, q_hi=q_hi
+        ticker=tickers, time_idx=time_idx, y_true=y_true, p50=p50, q_lo=q_lo, q_hi=q_hi
     )
 
 
 def _metrics_from_arrays(arr: Dict[str, np.ndarray]) -> Dict[str, float]:
-    y = arr["y_true"]; p = arr["p50"]; lo = arr["q_lo"]; hi = arr["q_hi"]
+    y = arr["y_true"]
+    p = arr["p50"]
+    lo = arr["q_lo"]
+    hi = arr["q_hi"]
     m = np.isfinite(y) & np.isfinite(p) & np.isfinite(lo) & np.isfinite(hi)
     y, p, lo, hi = y[m], p[m], lo[m], hi[m]
     mae = float(np.mean(np.abs(p - y)))
     rmse = float(np.sqrt(np.mean((p - y) ** 2)))
     cov = float(np.mean((y >= lo) & (y <= hi)))
     piw = float(np.mean(hi - lo))
-    return {"mae": mae, "rmse": rmse, "coverage_90": cov, "pi_width_90": piw, "n": int(len(y))}
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "coverage_90": cov,
+        "pi_width_90": piw,
+        "n": int(len(y)),
+    }
 
 
 def _daily_rank_ic(arr: Dict[str, np.ndarray]) -> Tuple[pd.DataFrame, float, float]:
-    df = pd.DataFrame({"time_idx": arr["time_idx"], "ticker": arr["ticker"], "p50": arr["p50"], "y": arr["y_true"]})
+    df = pd.DataFrame(
+        {
+            "time_idx": arr["time_idx"],
+            "ticker": arr["ticker"],
+            "p50": arr["p50"],
+            "y": arr["y_true"],
+        }
+    )
     out = []
     for t, g in df.groupby("time_idx"):
         if g["p50"].nunique() < 3 or g["y"].nunique() < 3:
@@ -458,12 +511,21 @@ def _daily_rank_ic(arr: Dict[str, np.ndarray]) -> Tuple[pd.DataFrame, float, flo
     )
 
 
-def _costed_sharpe(arr: Dict[str, np.ndarray], top_q: float = 0.1, cost_bps: float = 10.0) -> float:
+def _costed_sharpe(
+    arr: Dict[str, np.ndarray], top_q: float = 0.1, cost_bps: float = 10.0
+) -> float:
     """
     Simple equal-weight daily long/short using p50 rank; realized y_true (5D).
     Cost model: 1-way cost_bps applied on *turnover* (sum of absolute weight changes).
     """
-    df = pd.DataFrame({"time_idx": arr["time_idx"], "ticker": arr["ticker"], "p50": arr["p50"], "y": arr["y_true"]})
+    df = pd.DataFrame(
+        {
+            "time_idx": arr["time_idx"],
+            "ticker": arr["ticker"],
+            "p50": arr["p50"],
+            "y": arr["y_true"],
+        }
+    )
     rets = []
     prev_weights = {}
     cost_rate = cost_bps * 1e-4
@@ -473,8 +535,10 @@ def _costed_sharpe(arr: Dict[str, np.ndarray], top_q: float = 0.1, cost_bps: flo
         k = max(1, int(n * top_q))
         short = g.iloc[:k]
         long = g.iloc[-k:]
-        w = {**{tic: -1.0 / k for tic in short["ticker"]},
-             **{tic:  1.0 / k for tic in long["ticker"]}}
+        w = {
+            **{tic: -1.0 / k for tic in short["ticker"]},
+            **{tic: 1.0 / k for tic in long["ticker"]},
+        }
         keys = set(w.keys()) | set(prev_weights.keys())
         turnover = sum(abs(w.get(k_, 0.0) - prev_weights.get(k_, 0.0)) for k_ in keys)
         gross = float(long["y"].mean() - short["y"].mean())
@@ -499,7 +563,13 @@ def main(cfg: DictConfig):
     # Defaults for CV (override via +cv.*)
     cv = dict(n_folds=5, val_days=120, embargo_days=int(cfg.data.split.embargo_days))
     if hasattr(cfg, "cv"):
-        cv.update({k: int(v) for k, v in OmegaConf.to_container(cfg.cv, resolve=True).items() if k in cv})
+        cv.update(
+            {
+                k: int(v)
+                for k, v in OmegaConf.to_container(cfg.cv, resolve=True).items()
+                if k in cv
+            }
+        )
 
     print(f"=== Rolling CV settings === {cv}")
 
@@ -521,7 +591,9 @@ def main(cfg: DictConfig):
         raise SystemExit("No valid folds constructed. Adjust val_days / embargo_days.")
     print("Folds:")
     for i, f in enumerate(folds, 1):
-        print(f"  Fold {i}: train_end ≤ {f['train_end'].date()} | val ∈ [{f['val_start'].date()}, {f['val_end'].date()}] | embargo {f['embargo_days']}d")
+        print(
+            f"  Fold {i}: train_end ≤ {f['train_end'].date()} | val ∈ [{f['val_start'].date()}, {f['val_end'].date()}] | embargo {f['embargo_days']}d"
+        )
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_root = Path(cfg.paths.log_dir) / "cv" / ts
@@ -544,7 +616,9 @@ def main(cfg: DictConfig):
         fold_dir.mkdir(parents=True, exist_ok=True)
         model = _fit_one_fold(cfg, train_ds, val_ds, fold_dir)
 
-        val_loader = _loader(val_ds, int(cfg.trainer.batch_size), False, int(cfg.trainer.num_workers))
+        val_loader = _loader(
+            val_ds, int(cfg.trainer.batch_size), False, int(cfg.trainer.num_workers)
+        )
         arr = _predict_decode(model, train_ds, val_loader, target_col)
 
         m = _metrics_from_arrays(arr)
@@ -556,7 +630,9 @@ def main(cfg: DictConfig):
         m["costed_sharpe_ls10"] = float(sharpe)
 
         ic_df.to_csv(fold_dir / "daily_ic.csv", index=False)
-        pd.DataFrame(arr).head(5000).to_csv(fold_dir / "predictions_sample.csv", index=False)
+        pd.DataFrame(arr).head(5000).to_csv(
+            fold_dir / "predictions_sample.csv", index=False
+        )
         with open(fold_dir / "metrics.json", "w") as fp:
             json.dump(m, fp, indent=2)
         per_fold.append(m)
@@ -567,7 +643,11 @@ def main(cfg: DictConfig):
     if per_fold:
         keys = per_fold[0].keys()
         for k in keys:
-            vals = [pf[k] for pf in per_fold if isinstance(pf[k], (int, float)) and np.isfinite(pf[k])]
+            vals = [
+                pf[k]
+                for pf in per_fold
+                if isinstance(pf[k], (int, float)) and np.isfinite(pf[k])
+            ]
             if not vals:
                 continue
             agg[f"{k}_mean"] = float(np.mean(vals))

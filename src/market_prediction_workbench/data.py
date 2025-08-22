@@ -212,8 +212,12 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # --- choose price column (prefer adjusted if present) ---
     price_col = "adj_close" if "adj_close" in df.columns else "close"
     if price_col != "adj_close":
-        print("Adjusted close ('adj_close') not found; using 'close' for labels/features.")
-    safe_price = pl.when(pl.col(price_col) <= 1e-6).then(1e-6).otherwise(pl.col(price_col))
+        print(
+            "Adjusted close ('adj_close') not found; using 'close' for labels/features."
+        )
+    safe_price = (
+        pl.when(pl.col(price_col) <= 1e-6).then(1e-6).otherwise(pl.col(price_col))
+    )
     log_close = safe_price.log()
 
     # --- Known-future (calendar) features ---
@@ -266,25 +270,27 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         )
 
         # log market cap per row
-        df = df.with_columns(
-            (pl.col("market_cap_clean").log1p()).alias("log_mcap_row")
-        )
+        df = df.with_columns((pl.col("market_cap_clean").log1p()).alias("log_mcap_row"))
 
         # ticker-level static: median log(mcap) across available history
         # (median is robust to occasional spikes / stale caps)
-        log_mcap_static = (
-            df.group_by("ticker_id")
-            .agg(pl.col("log_mcap_row").median().alias("log_mcap_static"))
+        log_mcap_static = df.group_by("ticker_id").agg(
+            pl.col("log_mcap_row").median().alias("log_mcap_static")
         )
 
         df = df.join(log_mcap_static, on="ticker_id", how="left")
 
         # global cross-sectional z-score over tickers (kept *static* per ticker)
-        stats = log_mcap_static.select([
-            pl.col("log_mcap_static").mean().alias("m_mu"),
-            pl.col("log_mcap_static").std().alias("m_sd")
-        ]).row(0)
-        m_mu, m_sd = float(stats[0]), float(stats[1] if stats[1] and stats[1] > 0 else 1.0)
+        stats = log_mcap_static.select(
+            [
+                pl.col("log_mcap_static").mean().alias("m_mu"),
+                pl.col("log_mcap_static").std().alias("m_sd"),
+            ]
+        ).row(0)
+        m_mu, m_sd = (
+            float(stats[0]),
+            float(stats[1] if stats[1] and stats[1] > 0 else 1.0),
+        )
 
         df = df.with_columns(
             ((pl.col("log_mcap_static") - m_mu) / m_sd).alias("market_cap_static_norm")
@@ -295,12 +301,19 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     else:
         print("[warn] market_cap or ticker_id missing — skipping static size feature.")
 
-
     df = df.with_columns(
-        log_return_1d=(pl.when(~is_missing_mask).then(log_return_1d_base_expr)).over("ticker_id"),
-        log_return_5d=(pl.when(~is_missing_mask).then(log_close - log_close.shift(5))).over("ticker_id"),
-        log_return_20d=(pl.when(~is_missing_mask).then(log_close - log_close.shift(20))).over("ticker_id"),
-        volume_zscore_20d=(pl.when(~is_missing_mask).then(volume_zscore_expr)).over("ticker_id"),
+        log_return_1d=(pl.when(~is_missing_mask).then(log_return_1d_base_expr)).over(
+            "ticker_id"
+        ),
+        log_return_5d=(
+            pl.when(~is_missing_mask).then(log_close - log_close.shift(5))
+        ).over("ticker_id"),
+        log_return_20d=(
+            pl.when(~is_missing_mask).then(log_close - log_close.shift(20))
+        ).over("ticker_id"),
+        volume_zscore_20d=(pl.when(~is_missing_mask).then(volume_zscore_expr)).over(
+            "ticker_id"
+        ),
         volatility_20d=(
             pl.when(~is_missing_mask).then(
                 log_return_1d_base_expr.rolling_std(window_size=20, min_samples=10)
@@ -316,13 +329,19 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
                 log_return_1d_base_expr.rolling_kurtosis(window_size=20)
             )
         ).over("ticker_id"),
-        price_change=(pl.when(~is_missing_mask).then(safe_price.diff(1))).over("ticker_id"),
+        price_change=(pl.when(~is_missing_mask).then(safe_price.diff(1))).over(
+            "ticker_id"
+        ),
     )
 
     # --- RSI (14) ---
     df = df.with_columns(
-        gain=pl.when(pl.col("price_change") > 0).then(pl.col("price_change")).otherwise(0.0),
-        loss=pl.when(pl.col("price_change") < 0).then(-pl.col("price_change")).otherwise(0.0),
+        gain=pl.when(pl.col("price_change") > 0)
+        .then(pl.col("price_change"))
+        .otherwise(0.0),
+        loss=pl.when(pl.col("price_change") < 0)
+        .then(-pl.col("price_change"))
+        .otherwise(0.0),
     )
     avg_gain_expr = pl.col("gain").ewm_mean(alpha=1 / 14, min_samples=10)
     avg_loss_expr = pl.col("loss").ewm_mean(alpha=1 / 14, min_samples=10)
@@ -336,18 +355,24 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.when(pl.col("avg_gain") > 1e-6).then(100.0).otherwise(1.0))
     )
     df = df.with_columns(
-        rsi_14d=(pl.when(~is_missing_mask).then(100.0 - (100.0 / (1.0 + rs_expr)))).alias("rsi_14d")
+        rsi_14d=(
+            pl.when(~is_missing_mask).then(100.0 - (100.0 / (1.0 + rs_expr)))
+        ).alias("rsi_14d")
     )
 
     # --- MACD (12/26 EMA, 9-signal) ---
     ema_12_expr = safe_price.ewm_mean(span=12, min_samples=11)
     ema_26_expr = safe_price.ewm_mean(span=26, min_samples=25)
     df = df.with_columns(
-        macd_base=(pl.when(~is_missing_mask).then(ema_12_expr - ema_26_expr)).over("ticker_id")
+        macd_base=(pl.when(~is_missing_mask).then(ema_12_expr - ema_26_expr)).over(
+            "ticker_id"
+        )
     )
     macd_signal_expr = pl.col("macd_base").ewm_mean(span=9, min_samples=8)
     df = df.with_columns(
-        macd_signal_base=(pl.when(~is_missing_mask).then(macd_signal_expr)).over("ticker_id")
+        macd_signal_base=(pl.when(~is_missing_mask).then(macd_signal_expr)).over(
+            "ticker_id"
+        )
     )
     df = df.rename({"macd_base": "macd", "macd_signal_base": "macd_signal"})
 
@@ -371,17 +396,27 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     # TRADING-DAY TARGETS (labels) — computed ONLY on non-missing (trading) rows
     # ---------------------------------------------------------------------
     print("Computing trading-day targets (1/5/20)…")
-    trading_only = df.filter(~pl.col("is_missing").cast(pl.Boolean)).select(
-        "ticker_id", "sector_id", "date", log_close.alias("log_price_td")
-    ).sort("ticker_id", "date")
-
-    trading_only = trading_only.with_columns(
-        (pl.col("log_price_td").shift(-1) - pl.col("log_price_td")).over("ticker_id").alias("target_1d"),
-        (pl.col("log_price_td").shift(-5) - pl.col("log_price_td")).over("ticker_id").alias("target_5d"),
-        (pl.col("log_price_td").shift(-20) - pl.col("log_price_td")).over("ticker_id").alias("target_20d"),
+    trading_only = (
+        df.filter(~pl.col("is_missing").cast(pl.Boolean))
+        .select("ticker_id", "sector_id", "date", log_close.alias("log_price_td"))
+        .sort("ticker_id", "date")
     )
 
-    targets = trading_only.select("ticker_id", "date", "target_1d", "target_5d", "target_20d")
+    trading_only = trading_only.with_columns(
+        (pl.col("log_price_td").shift(-1) - pl.col("log_price_td"))
+        .over("ticker_id")
+        .alias("target_1d"),
+        (pl.col("log_price_td").shift(-5) - pl.col("log_price_td"))
+        .over("ticker_id")
+        .alias("target_5d"),
+        (pl.col("log_price_td").shift(-20) - pl.col("log_price_td"))
+        .over("ticker_id")
+        .alias("target_20d"),
+    )
+
+    targets = trading_only.select(
+        "ticker_id", "date", "target_1d", "target_5d", "target_20d"
+    )
     df = df.join(targets, on=["ticker_id", "date"], how="left")
 
     # ---------------------------------------------------------------------
@@ -414,28 +449,33 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
 
     # Realized vol (20d) for sector (per sector)
     sec = sec.with_columns(
-        sector_vol_20d=pl.col("sector_ret_1d").rolling_std(window_size=20, min_samples=10).over("sector_id")
+        sector_vol_20d=pl.col("sector_ret_1d")
+        .rolling_std(window_size=20, min_samples=10)
+        .over("sector_id")
     )
 
     # Join context
     df = df.join(mkt, on="date", how="left")
     df = df.join(sec, on=["date", "sector_id"], how="left")
-    
+
     # --- Region inference from ticker suffix (very light heuristic) ---
     # Map common suffixes to a coarse region label (string literals must use pl.lit)
     df = df.with_columns(
         region=pl.when(
-                    pl.col("ticker").str.ends_with(".DE")
-                    | pl.col("ticker").str.ends_with(".F")
-                    | pl.col("ticker").str.ends_with(".BE")
-                    | pl.col("ticker").str.ends_with(".DU")
-                ).then(pl.lit("DE"))
-         .when(pl.col("ticker").str.ends_with(".HK")).then(pl.lit("HK"))
-         .when(
-                    pl.col("ticker").str.ends_with(".SZ")
-                    | pl.col("ticker").str.ends_with(".SS")
-                ).then(pl.lit("CN"))
-         .otherwise(pl.lit("US"))
+            pl.col("ticker").str.ends_with(".DE")
+            | pl.col("ticker").str.ends_with(".F")
+            | pl.col("ticker").str.ends_with(".BE")
+            | pl.col("ticker").str.ends_with(".DU")
+        )
+        .then(pl.lit("DE"))
+        .when(pl.col("ticker").str.ends_with(".HK"))
+        .then(pl.lit("HK"))
+        .when(
+            pl.col("ticker").str.ends_with(".SZ")
+            | pl.col("ticker").str.ends_with(".SS")
+        )
+        .then(pl.lit("CN"))
+        .otherwise(pl.lit("US"))
     )
 
     # Region index return (median of log_return_1d among trading names in region)
@@ -444,14 +484,14 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
     )
     reg = (
         cs_region.group_by(["date", "region"])
-                 .agg(pl.median("log_return_1d").alias("region_ret_1d"))
-                 .sort(["region", "date"])
+        .agg(pl.median("log_return_1d").alias("region_ret_1d"))
+        .sort(["region", "date"])
     )
     reg = reg.with_columns(
         pl.col("region_ret_1d")
-          .rolling_std(window_size=20, min_samples=10)
-          .over("region")
-          .alias("region_vol_20d")
+        .rolling_std(window_size=20, min_samples=10)
+        .over("region")
+        .alias("region_vol_20d")
     )
 
     # Join region context
@@ -474,7 +514,11 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         # expected columns: date, VIX, VSTOXX, US2Y, US10Y, DE2Y, DE10Y (case-insensitive ok)
         # normalize column names
         macro = macro.rename({c: c.upper() for c in macro.columns})
-        want = [c for c in ["DATE","VIX","VSTOXX","US2Y","US10Y","DE2Y","DE10Y"] if c in macro.columns]
+        want = [
+            c
+            for c in ["DATE", "VIX", "VSTOXX", "US2Y", "US10Y", "DE2Y", "DE10Y"]
+            if c in macro.columns
+        ]
         if "DATE" not in want:
             print("Macro parquet present but missing DATE column; skipping macro join.")
         else:
@@ -485,12 +529,22 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
                     macro = macro.with_columns(pl.col(c).cast(pl.Float32))
             df = df.join(macro, on="date", how="left")
     else:
-        print("No macro file at data/external/macro.parquet – skipping VIX/yields (proxies still added).")
+        print(
+            "No macro file at data/external/macro.parquet – skipping VIX/yields (proxies still added)."
+        )
 
     # --- Forward-fill features (not labels) and final null handling ---
     target_cols = ["target_1d", "target_5d", "target_20d"]
     EXCLUDE_FROM_FILLS = set(
-        ["ticker", "date", "ticker_id", "sector_id", "is_quarter_end", "is_missing", "region"]  # <- added "region"
+        [
+            "ticker",
+            "date",
+            "ticker_id",
+            "sector_id",
+            "is_quarter_end",
+            "is_missing",
+            "region",
+        ]  # <- added "region"
         + target_cols
     )
     feature_cols = [c for c in df.columns if c not in EXCLUDE_FROM_FILLS]
@@ -511,6 +565,7 @@ def create_features_and_targets(df: pl.DataFrame) -> pl.DataFrame:
         raise ValueError("All data was dropped after feature engineering.")
 
     return df
+
 
 if __name__ == "__main__":
     DATA_DIR = Path("data")

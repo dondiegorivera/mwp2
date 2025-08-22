@@ -21,6 +21,7 @@ from market_prediction_workbench.model import GlobalTFT
 
 # >>> PATCH: added import for rank-IC helper
 from scipy.stats import spearmanr
+
 # <<< PATCH
 
 
@@ -114,7 +115,9 @@ def _inverse_with_groups(
 
 
 # >>> PATCH: rank-signal helpers (ADD ONLY)
-def _daily_rank_ic_simple(time_idx: np.ndarray, p50: np.ndarray, y: np.ndarray) -> float:
+def _daily_rank_ic_simple(
+    time_idx: np.ndarray, p50: np.ndarray, y: np.ndarray
+) -> float:
     """
     Spearman rank-IC computed cross-sectionally per time index then averaged.
     Expects de-normalized p50 and true y for horizon 1.
@@ -167,6 +170,8 @@ def _ls_sharpe_costed(
     if len(r) <= 1 or np.std(r, ddof=1) == 0.0:
         return float("nan")
     return float(r.mean() / r.std(ddof=1) * np.sqrt(252.0))
+
+
 # <<< PATCH
 
 
@@ -234,9 +239,9 @@ def run_inference(
 
     preds_norm = torch.cat(preds_norm_list, dim=0)  # [B, H, T, Q]
     trues_norm = torch.cat(trues_norm_list, dim=0)  # [B, H, T]
-    groups = torch.cat(groups_all, dim=0)           # [B, G]
+    groups = torch.cat(groups_all, dim=0)  # [B, G]
     tickers = np.array(tickers_all)
-    time_idx = np.concatenate(t_idx_all, axis=0)    # [B, H]
+    time_idx = np.concatenate(t_idx_all, axis=0)  # [B, H]
 
     normalizer = dataset.target_normalizer
 
@@ -250,7 +255,9 @@ def run_inference(
         target_preds_by_q = []
         for q in range(num_quantiles):
             pred_data = preds_norm[:, :, i, q]
-            if isinstance(normalizer, MultiNormalizer) and i < len(normalizer.normalizers):
+            if isinstance(normalizer, MultiNormalizer) and i < len(
+                normalizer.normalizers
+            ):
                 norm = normalizer.normalizers[i]
             else:
                 norm = normalizer
@@ -271,8 +278,10 @@ def run_inference(
             q_vals = None
 
     if q_vals is not None:
+
         def _nearest_idx(target: float) -> int:
             return int(np.argmin(np.abs(q_vals - target)))
+
         lo_idx = _nearest_idx(0.05)
         mid_idx = _nearest_idx(0.50)
         hi_idx = _nearest_idx(0.95)
@@ -295,7 +304,6 @@ def run_inference(
             true_dict[f"{name}{suffix}"] = trues_dec[:, h, i].numpy()
 
     return pred_dict, true_dict, short_names, num_horizons
-
 
 
 # -----------------------------------------------------------------------------#
@@ -667,7 +675,7 @@ def main(cfg: DictConfig):
     print("Model loaded successfully.")
 
     # Build eval dataset using the SAME encoders/lengths/groups as training
-    #eval_ds = TimeSeriesDataSet.from_parameters(saved_ts_params, eval_df, predict=True)
+    # eval_ds = TimeSeriesDataSet.from_parameters(saved_ts_params, eval_df, predict=True)
 
     # Build eval dataset by cloning from the full_dataset (safer than from_parameters).
     eval_ds = TimeSeriesDataSet.from_dataset(
@@ -711,13 +719,23 @@ def main(cfg: DictConfig):
             m = np.isfinite(p50) & np.isfinite(y) & np.isfinite(ti_h1)
             if np.any(m):
                 ic = _daily_rank_ic_simple(time_idx=ti_h1[m], p50=p50[m], y=y[m])
-                sh = _ls_sharpe_costed(time_idx=ti_h1[m], ticker=np.array(tk)[m],
-                                       p50=p50[m], y=y[m], top_q=0.1, cost_bps=10.0)
+                sh = _ls_sharpe_costed(
+                    time_idx=ti_h1[m],
+                    ticker=np.array(tk)[m],
+                    p50=p50[m],
+                    y=y[m],
+                    top_q=0.1,
+                    cost_bps=10.0,
+                )
             else:
                 ic, sh = float("nan"), float("nan")
             print(f"{name}: rankIC={ic:.4f}, LS10 Sharpe (10bps)={sh:.3f}")
-            metrics[f"{name}_rank_ic@h1"] = float(ic) if np.isfinite(ic) else float("nan")
-            metrics[f"{name}_ls10_sharpe_costed@h1"] = float(sh) if np.isfinite(sh) else float("nan")
+            metrics[f"{name}_rank_ic@h1"] = (
+                float(ic) if np.isfinite(ic) else float("nan")
+            )
+            metrics[f"{name}_ls10_sharpe_costed@h1"] = (
+                float(sh) if np.isfinite(sh) else float("nan")
+            )
     # <<< PATCH
 
     # Coverage table

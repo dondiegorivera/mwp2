@@ -21,7 +21,10 @@ from pytorch_forecasting.data.encoders import (
     EncoderNormalizer,
     MultiNormalizer,
 )
-from pytorch_forecasting.data.encoders import GroupNormalizer as _PFGroupNorm, MultiNormalizer as _PFMultiNorm
+from pytorch_forecasting.data.encoders import (
+    GroupNormalizer as _PFGroupNorm,
+    MultiNormalizer as _PFMultiNorm,
+)
 
 from pytorch_lightning.callbacks import (
     EarlyStopping,
@@ -31,18 +34,20 @@ from pytorch_lightning.callbacks import (
 
 from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
 import math
-import numpy as np
-import pandas as pd
 
 
 @torch.no_grad()
-def _inverse_with_groups(data: torch.Tensor, normalizer, groups: torch.Tensor) -> torch.Tensor:
+def _inverse_with_groups(
+    data: torch.Tensor, normalizer, groups: torch.Tensor
+) -> torch.Tensor:
     """
     Invert PF target normalizer per group for correct cross-sectional ranking.
     """
     if isinstance(normalizer, _PFGroupNorm):
         g = groups[:, 0].cpu().numpy()
-        scale = torch.as_tensor(normalizer.get_parameters(g), dtype=data.dtype, device=data.device)
+        scale = torch.as_tensor(
+            normalizer.get_parameters(g), dtype=data.dtype, device=data.device
+        )
         loc, sigm = scale[:, 0], scale[:, 1]
         while loc.dim() < data.dim():
             loc = loc.unsqueeze(1)
@@ -78,24 +83,32 @@ class RankICCallback(pl.callbacks.Callback):
     Uses the dataset's target_normalizer to invert predictions per-group safely.
     """
 
-    def __init__(self, dataset: TimeSeriesDataSet, target_idx: int = 0, horizon: int = 1):
+    def __init__(
+        self, dataset: TimeSeriesDataSet, target_idx: int = 0, horizon: int = 1
+    ):
         super().__init__()
         self.dataset = dataset
         self.target_idx = int(target_idx)
         self.horizon = int(horizon)
 
     @staticmethod
-    def _inverse_with_groups(data: torch.Tensor, normalizer, groups: torch.Tensor) -> torch.Tensor:
+    def _inverse_with_groups(
+        data: torch.Tensor, normalizer, groups: torch.Tensor
+    ) -> torch.Tensor:
         from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
+
         if isinstance(normalizer, GroupNormalizer):
             g = groups[:, 0].detach().cpu().numpy()
             scale = torch.as_tensor(
                 normalizer.get_parameters(g),  # [B,2] loc,scale
-                dtype=data.dtype, device=data.device
+                dtype=data.dtype,
+                device=data.device,
             )
             loc, sig = scale[:, 0], scale[:, 1]
-            while loc.dim() < data.dim(): loc = loc.unsqueeze(1)
-            while sig.dim() < data.dim(): sig = sig.unsqueeze(1)
+            while loc.dim() < data.dim():
+                loc = loc.unsqueeze(1)
+            while sig.dim() < data.dim():
+                sig = sig.unsqueeze(1)
             return data * sig + loc
         if isinstance(normalizer, MultiNormalizer):
             parts = [
@@ -112,12 +125,14 @@ class RankICCallback(pl.callbacks.Callback):
         yr = pd.Series(y).rank(method="average").to_numpy()
         xv = xr - xr.mean()
         yv = yr - yr.mean()
-        denom = (np.sqrt((xv**2).sum()) * np.sqrt((yv**2).sum()))
+        denom = np.sqrt((xv**2).sum()) * np.sqrt((yv**2).sum())
         if denom <= 0 or len(xv) < 2:
             return float("nan")
         return float((xv * yv).sum() / denom)
 
-    def on_validation_epoch_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+    def on_validation_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
         pl_module.eval()
         device = pl_module.device
 
@@ -173,8 +188,10 @@ class RankICCallback(pl.callbacks.Callback):
                 elif pred_norm.dim() == 3:
                     pred_norm = pred_norm.unsqueeze(2)  # [B,H,1,Q]
 
-                pred_sel = pred_norm[:, self.horizon - 1, self.target_idx, mid_idx]  # [B]
-                true_sel = y_norm[:, self.horizon - 1, self.target_idx]              # [B]
+                pred_sel = pred_norm[
+                    :, self.horizon - 1, self.target_idx, mid_idx
+                ]  # [B]
+                true_sel = y_norm[:, self.horizon - 1, self.target_idx]  # [B]
 
                 groups = x["groups"]
                 normalizer = self.dataset.target_normalizer
@@ -206,7 +223,7 @@ class RankICCallback(pl.callbacks.Callback):
 
         preds = np.concatenate(preds_all, axis=0)
         trues = np.concatenate(trues_all, axis=0)
-        days  = np.concatenate(days_all, axis=0)
+        days = np.concatenate(days_all, axis=0)
 
         df = pd.DataFrame({"day": days, "p": preds, "y": trues})
         ics = []
@@ -233,9 +250,13 @@ if torch.cuda.is_available():
             torch.set_float32_matmul_precision("medium")
             print("PyTorch float32 matmul precision set to 'medium' for Tensor Cores.")
         else:
-            print("Current GPU does not have Tensor Cores (or CC < 7.0). Default matmul precision used.")
+            print(
+                "Current GPU does not have Tensor Cores (or CC < 7.0). Default matmul precision used."
+            )
     except Exception as e:
-        print(f"Could not set matmul precision (may be normal if no CUDA GPU or older PyTorch): {e}")
+        print(
+            f"Could not set matmul precision (may be normal if no CUDA GPU or older PyTorch): {e}"
+        )
 else:
     print("CUDA not available. Running on CPU. Matmul precision setting skipped.")
 
@@ -246,7 +267,9 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
 
     if not isinstance(dataset_encoders, dict) or not dataset_encoders:
         if timeseries_dataset.categoricals:
-            print("Warning: _categorical_encoders missing/empty but dataset has categoricals.")
+            print(
+                "Warning: _categorical_encoders missing/empty but dataset has categoricals."
+            )
         return {}
 
     for col_name in timeseries_dataset.categoricals:
@@ -270,7 +293,9 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
                     )
                     cardinality_val = num_classes + (1 if add_nan_flag else 0)
                 else:
-                    print(f"ERROR: Could not determine cardinality for '{col_name}'. Skipping.")
+                    print(
+                        f"ERROR: Could not determine cardinality for '{col_name}'. Skipping."
+                    )
                     continue
 
             tft_cardinality = max(1, int(cardinality_val))
@@ -282,7 +307,9 @@ def get_embedding_sizes_for_tft(timeseries_dataset: TimeSeriesDataSet) -> dict:
             embedding_sizes[col_name] = (tft_cardinality, dim)
             print(f"DEBUG embedding for '{col_name}': ({tft_cardinality}, {dim})")
         else:
-            print(f"Warning: categorical '{col_name}' missing in _categorical_encoders.")
+            print(
+                f"Warning: categorical '{col_name}' missing in _categorical_encoders."
+            )
 
     if not embedding_sizes and timeseries_dataset.categoricals:
         print("Warning: embedding_sizes empty; TFT will use defaults or error.")
@@ -315,7 +342,9 @@ def main(cfg: DictConfig) -> None:
     processed_data_path = Path(cfg.paths.processed_data_file)
     if not processed_data_path.exists():
         print(f"Processed data not found at {processed_data_path}.")
-        print("Please run the data processing pipeline first (e.g., python src/market_prediction_workbench/data.py)")
+        print(
+            "Please run the data processing pipeline first (e.g., python src/market_prediction_workbench/data.py)"
+        )
         return
 
     polars_data_df = pl_df.read_parquet(processed_data_path)
@@ -328,11 +357,15 @@ def main(cfg: DictConfig) -> None:
     else:
         raise ValueError("Required column 'date' not found in processed data.")
 
-    time_idx_col_name = (str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx")
+    time_idx_col_name = (
+        str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx"
+    )
     if time_idx_col_name in data_pd.columns:
         data_pd[time_idx_col_name] = data_pd[time_idx_col_name].astype(np.int64)
     else:
-        raise ValueError(f"Time index column '{time_idx_col_name}' not found for casting.")
+        raise ValueError(
+            f"Time index column '{time_idx_col_name}' not found for casting."
+        )
 
     def get_list_from_cfg_node(config_node_val):
         if config_node_val is None:
@@ -341,21 +374,45 @@ def main(cfg: DictConfig) -> None:
             return [str(config_node_val)]
         if isinstance(config_node_val, (list, ListConfig)):
             return [str(item) for item in config_node_val]
-        raise TypeError(f"Expected list or primitive for config node, got {type(config_node_val)}")
+        raise TypeError(
+            f"Expected list or primitive for config node, got {type(config_node_val)}"
+        )
 
-    group_ids_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.group_ids", default=[]))
-    target_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.target", default=[]))
-    static_categoricals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.static_categoricals", default=[]))
-    static_reals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.static_reals", default=[]))
-    time_varying_known_categoricals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.time_varying_known_categoricals", default=[]))
-    time_varying_known_reals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.time_varying_known_reals", default=[]))
-    time_varying_unknown_categoricals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.time_varying_unknown_categoricals", default=[]))
-    time_varying_unknown_reals_list = get_list_from_cfg_node(OmegaConf.select(cfg, "data.time_varying_unknown_reals", default=[]))
-    time_idx_str = (str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx")
+    group_ids_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.group_ids", default=[])
+    )
+    target_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.target", default=[])
+    )
+    static_categoricals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.static_categoricals", default=[])
+    )
+    static_reals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.static_reals", default=[])
+    )
+    time_varying_known_categoricals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.time_varying_known_categoricals", default=[])
+    )
+    time_varying_known_reals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.time_varying_known_reals", default=[])
+    )
+    time_varying_unknown_categoricals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.time_varying_unknown_categoricals", default=[])
+    )
+    time_varying_unknown_reals_list = get_list_from_cfg_node(
+        OmegaConf.select(cfg, "data.time_varying_unknown_reals", default=[])
+    )
+    time_idx_str = (
+        str(cfg.data.time_idx) if OmegaConf.select(cfg, "data.time_idx") else "time_idx"
+    )
 
     # Cast configured categoricals to str
     all_categorical_cols_from_config = list(
-        dict.fromkeys(static_categoricals_list + time_varying_known_categoricals_list + time_varying_unknown_categoricals_list)
+        dict.fromkeys(
+            static_categoricals_list
+            + time_varying_known_categoricals_list
+            + time_varying_unknown_categoricals_list
+        )
     )
     for cat_col_name_str in all_categorical_cols_from_config:
         if cat_col_name_str in data_pd.columns:
@@ -364,10 +421,14 @@ def main(cfg: DictConfig) -> None:
                 and data_pd[cat_col_name_str].dtype != str
                 and not pd.api.types.is_string_dtype(data_pd[cat_col_name_str])
             ):
-                print(f"Casting categorical column '{cat_col_name_str}' to string. Original dtype: {data_pd[cat_col_name_str].dtype}")
+                print(
+                    f"Casting categorical column '{cat_col_name_str}' to string. Original dtype: {data_pd[cat_col_name_str].dtype}"
+                )
                 data_pd[cat_col_name_str] = data_pd[cat_col_name_str].astype(str)
         else:
-            print(f"Warning: Configured categorical column '{cat_col_name_str}' not found in DataFrame for dtype casting.")
+            print(
+                f"Warning: Configured categorical column '{cat_col_name_str}' not found in DataFrame for dtype casting."
+            )
 
     # --- DATE-BASED SPLIT WITH EMBARGO ---
     if OmegaConf.select(cfg, "data.split.use_date_split", default=True):
@@ -380,12 +441,19 @@ def main(cfg: DictConfig) -> None:
             cutoff_date = pd.to_datetime(str(cutoff_override))
         else:
             cutoff_date = min_date + (max_date - min_date) * train_frac
-        val_end_date = pd.to_datetime(str(val_end_override)) if val_end_override else max_date
+        val_end_date = (
+            pd.to_datetime(str(val_end_override)) if val_end_override else max_date
+        )
         embargo = pd.Timedelta(days=embargo_days)
 
         train_df = data_pd[data_pd["date"] <= (cutoff_date - embargo)]
-        val_df = data_pd[(data_pd["date"] >= (cutoff_date + embargo)) & (data_pd["date"] <= val_end_date)]
-        print(f"Date split: train ≤ {cutoff_date - embargo:%Y-%m-%d}, val ∈ [{cutoff_date + embargo:%Y-%m-%d}, {val_end_date:%Y-%m-%d}]")
+        val_df = data_pd[
+            (data_pd["date"] >= (cutoff_date + embargo))
+            & (data_pd["date"] <= val_end_date)
+        ]
+        print(
+            f"Date split: train ≤ {cutoff_date - embargo:%Y-%m-%d}, val ∈ [{cutoff_date + embargo:%Y-%m-%d}, {val_end_date:%Y-%m-%d}]"
+        )
     else:
         max_time_idx = data_pd[time_idx_str].max()
         train_cutoff_idx = int(max_time_idx * 0.8)
@@ -404,7 +472,9 @@ def main(cfg: DictConfig) -> None:
         val_df = val_df[val_df["ticker_id"].astype(str).isin(train_tickers)].copy()
         after_rows = len(val_df)
         after_tickers = val_df["ticker_id"].nunique()
-        print(f"Validation filter: kept {after_rows}/{before_rows} rows; tickers {after_tickers}/{before_tickers} overlap with training.")
+        print(
+            f"Validation filter: kept {after_rows}/{before_rows} rows; tickers {after_tickers}/{before_tickers} overlap with training."
+        )
 
     # ensure we own these frames (avoid pandas view warnings later)
     train_df = train_df.copy()
@@ -430,20 +500,38 @@ def main(cfg: DictConfig) -> None:
     )
 
     # diagnostics
-    missing_known = [c for c in time_varying_known_reals_list if c not in train_df.columns]
+    missing_known = [
+        c for c in time_varying_known_reals_list if c not in train_df.columns
+    ]
     if missing_known:
         print(f"[warn] time_varying_known_reals not in dataframe: {missing_known}")
-    missing_unknown = [c for c in time_varying_unknown_reals_list if c not in train_df.columns]
+    missing_unknown = [
+        c for c in time_varying_unknown_reals_list if c not in train_df.columns
+    ]
     if missing_unknown:
         print(f"[warn] time_varying_unknown_reals not in dataframe: {missing_unknown}")
 
     # --- SCALERS / NORMALIZERS ---
-    EXCLUDE_FROM_SCALING = {"is_quarter_end", "is_missing", "day_of_week", "day_of_month", "month"}
+    EXCLUDE_FROM_SCALING = {
+        "is_quarter_end",
+        "is_missing",
+        "day_of_week",
+        "day_of_month",
+        "month",
+    }
     scalers = {}
     if cfg.data.get("scalers") and cfg.data.scalers.get("default_reals_normalizer"):
         default_normalizer_name = cfg.data.scalers.default_reals_normalizer
-        reals_to_scale_all = list(dict.fromkeys(time_varying_unknown_reals_list + time_varying_known_reals_list + static_reals_list))
-        reals_to_scale = [c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING]
+        reals_to_scale_all = list(
+            dict.fromkeys(
+                time_varying_unknown_reals_list
+                + time_varying_known_reals_list
+                + static_reals_list
+            )
+        )
+        reals_to_scale = [
+            c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING
+        ]
         for col in reals_to_scale:
             if default_normalizer_name == "GroupNormalizer":
                 scalers[col] = GroupNormalizer(groups=group_ids_list, method="standard")
@@ -452,20 +540,36 @@ def main(cfg: DictConfig) -> None:
             elif default_normalizer_name == "StandardScaler":
                 scalers[col] = SklearnStandardScaler()
     else:
-        print("No 'default_reals_normalizer' specified. Using GroupNormalizer as default (excluding flags/raw calendars).")
-        reals_to_scale_all = list(dict.fromkeys(time_varying_unknown_reals_list + time_varying_known_reals_list + static_reals_list))
-        reals_to_scale = [c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING]
+        print(
+            "No 'default_reals_normalizer' specified. Using GroupNormalizer as default (excluding flags/raw calendars)."
+        )
+        reals_to_scale_all = list(
+            dict.fromkeys(
+                time_varying_unknown_reals_list
+                + time_varying_known_reals_list
+                + static_reals_list
+            )
+        )
+        reals_to_scale = [
+            c for c in reals_to_scale_all if c not in EXCLUDE_FROM_SCALING
+        ]
         for col in reals_to_scale:
-            scalers[str(col)] = GroupNormalizer(groups=group_ids_list, method="standard")
+            scalers[str(col)] = GroupNormalizer(
+                groups=group_ids_list, method="standard"
+            )
 
-    single_target_normalizer_prototype_name = OmegaConf.select(cfg, "data.scalers.target_normalizer", default="GroupNormalizer")
+    single_target_normalizer_prototype_name = OmegaConf.select(
+        cfg, "data.scalers.target_normalizer", default="GroupNormalizer"
+    )
     final_target_normalizer = None
     if single_target_normalizer_prototype_name:
         if len(target_list) > 1:
             normalizers_list = []
             for _ in target_list:
                 if single_target_normalizer_prototype_name == "GroupNormalizer":
-                    normalizers_list.append(GroupNormalizer(groups=group_ids_list, method="standard"))
+                    normalizers_list.append(
+                        GroupNormalizer(groups=group_ids_list, method="standard")
+                    )
                 elif single_target_normalizer_prototype_name == "EncoderNormalizer":
                     normalizers_list.append(EncoderNormalizer())
                 elif single_target_normalizer_prototype_name == "StandardScaler":
@@ -474,7 +578,9 @@ def main(cfg: DictConfig) -> None:
                 final_target_normalizer = MultiNormalizer(normalizers=normalizers_list)
         elif target_list:
             if single_target_normalizer_prototype_name == "GroupNormalizer":
-                final_target_normalizer = GroupNormalizer(groups=group_ids_list, method="standard")
+                final_target_normalizer = GroupNormalizer(
+                    groups=group_ids_list, method="standard"
+                )
             elif single_target_normalizer_prototype_name == "EncoderNormalizer":
                 final_target_normalizer = EncoderNormalizer()
             elif single_target_normalizer_prototype_name == "StandardScaler":
@@ -483,7 +589,9 @@ def main(cfg: DictConfig) -> None:
     # --- sample weights ---
     s = train_df["target_5d"].abs().clip(upper=train_df["target_5d"].quantile(0.99))
     train_df.loc[:, "sample_weight"] = 0.25 + 0.75 * (s / (s.median() + 1e-8))
-    val_df.loc[:, "sample_weight"] = 1.0  # needed because training_dataset uses weight="sample_weight"
+    val_df.loc[:, "sample_weight"] = (
+        1.0  # needed because training_dataset uses weight="sample_weight"
+    )
 
     print("Creating training TimeSeriesDataSet...")
     training_dataset = TimeSeriesDataSet(
@@ -497,13 +605,21 @@ def main(cfg: DictConfig) -> None:
 
     print("Creating validation TimeSeriesDataSet from training dataset...")
     validation_dataset = TimeSeriesDataSet.from_dataset(
-        training_dataset, val_df, allow_missing_timesteps=True, predict=True, stop_randomization=True
+        training_dataset,
+        val_df,
+        allow_missing_timesteps=True,
+        predict=True,
+        stop_randomization=True,
     )
     print("Validation TimeSeriesDataSet created successfully.")
 
     if len(training_dataset) == 0 or len(validation_dataset) == 0:
-        raise ValueError("Train/validation split resulted in an empty dataset. Check split logic and data range.")
-    print(f"Training samples: {len(training_dataset)}, Validation samples: {len(validation_dataset)}")
+        raise ValueError(
+            "Train/validation split resulted in an empty dataset. Check split logic and data range."
+        )
+    print(
+        f"Training samples: {len(training_dataset)}, Validation samples: {len(validation_dataset)}"
+    )
 
     # rank-IC callback uses the training dataset's normalizer/encoders
     rank_ic_cb = RankICCallback(dataset=training_dataset, target_idx=0, horizon=1)
@@ -511,10 +627,18 @@ def main(cfg: DictConfig) -> None:
     calculated_embedding_sizes = get_embedding_sizes_for_tft(training_dataset)
 
     model_module = hydra.utils.get_class(cfg.model._target_)
-    model_specific_params_from_cfg = {k: v for k, v in cfg.model.items() if k not in ["_target_", "learning_rate", "weight_decay"]}
+    model_specific_params_from_cfg = {
+        k: v
+        for k, v in cfg.model.items()
+        if k not in ["_target_", "learning_rate", "weight_decay"]
+    }
 
-    if "loss" in model_specific_params_from_cfg and isinstance(model_specific_params_from_cfg["loss"], DictConfig):
-        model_specific_params_from_cfg["loss"] = hydra.utils.instantiate(model_specific_params_from_cfg["loss"])
+    if "loss" in model_specific_params_from_cfg and isinstance(
+        model_specific_params_from_cfg["loss"], DictConfig
+    ):
+        model_specific_params_from_cfg["loss"] = hydra.utils.instantiate(
+            model_specific_params_from_cfg["loss"]
+        )
 
     model_specific_params_from_cfg["embedding_sizes"] = calculated_embedding_sizes
 
@@ -523,7 +647,9 @@ def main(cfg: DictConfig) -> None:
         model_specific_params=model_specific_params_from_cfg,
         learning_rate=cfg.model.learning_rate,
         weight_decay=cfg.model.weight_decay,
-        lr_schedule=OmegaConf.to_container(cfg.trainer.get("lr_schedule", {}), resolve=True),
+        lr_schedule=OmegaConf.to_container(
+            cfg.trainer.get("lr_schedule", {}), resolve=True
+        ),
         steps_per_epoch=int(np.ceil(len(training_dataset) / cfg.trainer.batch_size)),
         max_epochs=int(cfg.trainer.max_epochs),
     )
@@ -535,7 +661,10 @@ def main(cfg: DictConfig) -> None:
     num_workers = int(min(max(0, num_workers_cfg), max(0, num_cpu - 2)))
 
     def _safe_prefetch_kwargs(nw: int) -> dict:
-        return dict(persistent_workers=bool(nw > 0), **({"prefetch_factor": 4} if nw > 0 else {}))
+        return dict(
+            persistent_workers=bool(nw > 0),
+            **({"prefetch_factor": 4} if nw > 0 else {}),
+        )
 
     train_loader_kwargs = dict(
         train=True,
@@ -546,7 +675,9 @@ def main(cfg: DictConfig) -> None:
         **_safe_prefetch_kwargs(num_workers),
     )
 
-    use_weighted = bool(OmegaConf.select(cfg, "trainer.use_weighted_sampler", default=False))
+    use_weighted = bool(
+        OmegaConf.select(cfg, "trainer.use_weighted_sampler", default=False)
+    )
     train_loader = None
 
     # define once for sampler tail-upweighting
@@ -591,7 +722,9 @@ def main(cfg: DictConfig) -> None:
                         f"No encoded group/time columns and no 'sequence_id' in dataset.index. Columns: {cols[:15]}..."
                     )
                 seq_counts = idx_df["sequence_id"].value_counts()
-                row_weights = idx_df["sequence_id"].map(1.0 / seq_counts).astype("float64").values
+                row_weights = (
+                    idx_df["sequence_id"].map(1.0 / seq_counts).astype("float64").values
+                )
                 sampler = WeightedRandomSampler(
                     weights=torch.as_tensor(row_weights, dtype=torch.double),
                     num_samples=len(row_weights),
@@ -602,7 +735,9 @@ def main(cfg: DictConfig) -> None:
                     shuffle=False,
                     **train_loader_kwargs,
                 )
-                print(f"Using sequence-balanced WeightedRandomSampler across {len(seq_counts)} sequences.")
+                print(
+                    f"Using sequence-balanced WeightedRandomSampler across {len(seq_counts)} sequences."
+                )
             else:
                 # decode ids back to original strings
                 enc = training_dataset.categorical_encoders[group_name]
@@ -614,10 +749,16 @@ def main(cfg: DictConfig) -> None:
                         cls = enc.classes_
                         if isinstance(cls, dict):
                             inv = {v: k for k, v in cls.items()}
-                            decoded_vals = np.array([str(inv.get(int(v), v)) for v in encoded_vals], dtype=object)
+                            decoded_vals = np.array(
+                                [str(inv.get(int(v), v)) for v in encoded_vals],
+                                dtype=object,
+                            )
                         else:
                             decoded_vals = np.array(
-                                [str(cls[int(v)]) if int(v) < len(cls) else str(v) for v in encoded_vals],
+                                [
+                                    str(cls[int(v)]) if int(v) < len(cls) else str(v)
+                                    for v in encoded_vals
+                                ],
                                 dtype=object,
                             )
                     else:
@@ -628,14 +769,25 @@ def main(cfg: DictConfig) -> None:
                 # base weights: 1 / sqrt(count_per_ticker)
                 counts = pd.Series(idx_df["ticker_id_decoded"]).value_counts()
                 base_w_map = (1.0 / np.sqrt(counts)).to_dict()
-                base_w = np.array([base_w_map[v] for v in idx_df["ticker_id_decoded"]], dtype=np.float64)
+                base_w = np.array(
+                    [base_w_map[v] for v in idx_df["ticker_id_decoded"]],
+                    dtype=np.float64,
+                )
 
                 # tail up-weighting using main target at decoder start
                 key_df = train_df[[group_name, time_idx_str, main_target]].copy()
                 key_df[group_name] = key_df[group_name].astype(str)
-                key_df = key_df.rename(columns={group_name: "ticker_id_decoded", time_idx_str: time_col, main_target: "y_main"})
+                key_df = key_df.rename(
+                    columns={
+                        group_name: "ticker_id_decoded",
+                        time_idx_str: time_col,
+                        main_target: "y_main",
+                    }
+                )
 
-                idx_df_merged = idx_df.merge(key_df, on=["ticker_id_decoded", time_col], how="left")
+                idx_df_merged = idx_df.merge(
+                    key_df, on=["ticker_id_decoded", time_col], how="left"
+                )
                 y_abs = np.abs(idx_df_merged["y_main"].to_numpy())
                 finite = np.isfinite(y_abs)
                 if finite.any():
@@ -666,7 +818,9 @@ def main(cfg: DictConfig) -> None:
                     drop_last=train_loader_kwargs["drop_last"],
                     **_safe_prefetch_kwargs(num_workers),
                 )
-                print(f"Using WeightedRandomSampler… groups={len(counts)}, main_target={main_target}")
+                print(
+                    f"Using WeightedRandomSampler… groups={len(counts)}, main_target={main_target}"
+                )
 
         except Exception as e:
             print(f"Weighted sampler setup failed ({e}); falling back to shuffle=True.")
@@ -700,7 +854,9 @@ def main(cfg: DictConfig) -> None:
         mode="max",
         verbose=True,
     )
-    lr_monitor = LearningRateMonitor(logging_interval=cfg.trainer.lr_monitor_logging_interval)
+    lr_monitor = LearningRateMonitor(
+        logging_interval=cfg.trainer.lr_monitor_logging_interval
+    )
 
     # Save best by rank-IC (single “best” file so evaluate.py picks it)
     checkpoint_callback = ModelCheckpoint(
@@ -717,6 +873,7 @@ def main(cfg: DictConfig) -> None:
     logger = None
     if cfg.trainer.get("use_wandb", False):
         from pytorch_lightning.loggers import WandbLogger
+
         run_name_wandb = f"{cfg.project_name}_{cfg.experiment_id}"
         logger = WandbLogger(
             name=run_name_wandb,
@@ -727,11 +884,15 @@ def main(cfg: DictConfig) -> None:
         )
         print("WandB Logger initialized.")
         try:
-            wandb_run_dir = Path(logger.experiment.dir) if hasattr(logger, "experiment") else None
+            wandb_run_dir = (
+                Path(logger.experiment.dir) if hasattr(logger, "experiment") else None
+            )
             if wandb_run_dir and wandb_run_dir.exists():
                 hydra_cfg_path = Path(HydraConfig.get().runtime.output_dir) / ".hydra"
                 target_hydra_path = wandb_run_dir / ".hydra"
-                print(f"Copying Hydra config from {hydra_cfg_path} to {target_hydra_path}...")
+                print(
+                    f"Copying Hydra config from {hydra_cfg_path} to {target_hydra_path}..."
+                )
                 if target_hydra_path.exists():
                     shutil.rmtree(target_hydra_path)
                 shutil.copytree(hydra_cfg_path, target_hydra_path)
@@ -742,6 +903,7 @@ def main(cfg: DictConfig) -> None:
         # Log split stats
         try:
             import wandb
+
             wandb.run.summary["train_rows"] = len(train_df)
             wandb.run.summary["val_rows"] = len(val_df)
             wandb.run.summary["train_min_date"] = str(train_df["date"].min())
@@ -759,7 +921,11 @@ def main(cfg: DictConfig) -> None:
     trainer = pl.Trainer(
         max_epochs=cfg.trainer.max_epochs,
         accelerator=str(cfg.trainer.accelerator),
-        devices=(cfg.trainer.devices if str(cfg.trainer.devices).lower() != "auto" else "auto"),
+        devices=(
+            cfg.trainer.devices
+            if str(cfg.trainer.devices).lower() != "auto"
+            else "auto"
+        ),
         callbacks=callbacks,
         logger=logger,
         gradient_clip_val=cfg.trainer.get("gradient_clip_val", 0.5),
