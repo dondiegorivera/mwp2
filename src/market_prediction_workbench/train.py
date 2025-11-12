@@ -75,21 +75,28 @@ def _cfg_list(val):
     raise TypeError(f"Unsupported cfg node type: {type(val)}")
 
 
-# === Rank-IC callback =========================================================
 class RankICCallback(pl.callbacks.Callback):
     """
     Computes daily Spearman rank-IC on validation data (horizon=1, target_idx=0)
     after each val epoch and logs `val_rank_ic`.
     Uses the dataset's target_normalizer to invert predictions per-group safely.
+    Optionally restricts to the last N decoder days (calendar index) to stabilize IC.
     """
 
     def __init__(
-        self, dataset: TimeSeriesDataSet, target_idx: int = 0, horizon: int = 1
+        self,
+        dataset: TimeSeriesDataSet,
+        target_idx: int = 0,
+        horizon: int = 1,
+        last_n_days: int | None = None,
     ):
         super().__init__()
         self.dataset = dataset
         self.target_idx = int(target_idx)
         self.horizon = int(horizon)
+        self.last_n_days = (
+            int(last_n_days) if last_n_days and int(last_n_days) > 0 else None
+        )
 
     @staticmethod
     def _inverse_with_groups(
@@ -100,9 +107,7 @@ class RankICCallback(pl.callbacks.Callback):
         if isinstance(normalizer, GroupNormalizer):
             g = groups[:, 0].detach().cpu().numpy()
             scale = torch.as_tensor(
-                normalizer.get_parameters(g),  # [B,2] loc,scale
-                dtype=data.dtype,
-                device=data.device,
+                normalizer.get_parameters(g), dtype=data.dtype, device=data.device
             )
             loc, sig = scale[:, 0], scale[:, 1]
             while loc.dim() < data.dim():
@@ -127,7 +132,7 @@ class RankICCallback(pl.callbacks.Callback):
         yv = yr - yr.mean()
         denom = np.sqrt((xv**2).sum()) * np.sqrt((yv**2).sum())
         if denom <= 0 or len(xv) < 2:
-            return float("nan")
+            return np.nan
         return float((xv * yv).sum() / denom)
 
     def on_validation_epoch_end(
@@ -135,27 +140,14 @@ class RankICCallback(pl.callbacks.Callback):
     ) -> None:
         pl_module.eval()
         device = pl_module.device
-
-        # --- get the validation dataloader robustly (can be list or a single DataLoader) ---
-        vloaders = getattr(trainer, "val_dataloaders", None)
-        if vloaders is None:
-            try:
-                vloaders = trainer.val_dataloader()
-            except Exception:
-                vloaders = None
-
-        if vloaders is None:
-            pl_module.log("val_rank_ic", float("nan"), prog_bar=True, on_epoch=True)
-            if getattr(trainer, "is_global_zero", True):
-                print("[RankICCallback] No validation dataloader found; logging NaN.")
-            return
-
-        loader = vloaders[0] if isinstance(vloaders, (list, tuple)) else vloaders
-
-        # Where the PF TFT lives in your wrapper:
+        loader = (
+            trainer.val_dataloaders[0]
+            if isinstance(trainer.val_dataloaders, (list, tuple))
+            else trainer.val_dataloaders
+        )
         tft = getattr(pl_module, "model", pl_module)
 
-        # Find median quantile index robustly
+        # median quantile index
         q_list = getattr(getattr(tft, "loss", None), "quantiles", None)
         mid_idx = 0
         if isinstance(q_list, (list, tuple)):
@@ -168,50 +160,38 @@ class RankICCallback(pl.callbacks.Callback):
         preds_all, trues_all, days_all = [], [], []
 
         with torch.no_grad():
-            for x, y in loader:
-                # move to device
+            for batch in loader:
+                x, y = batch
+                # move dict of tensors
                 for k, v in x.items():
                     if torch.is_tensor(v):
                         x[k] = v.to(device)
 
-                # normalize y to [B,H,T]
                 y_norm = y[0] if isinstance(y, (list, tuple)) else y
                 if y_norm.dim() == 2:
                     y_norm = y_norm.unsqueeze(2)  # [B,H,1] -> [B,H,T]
 
                 out = tft(x)
                 pred_norm = out.prediction
-
-                # ensure [B,H,T,Q]
                 if isinstance(pred_norm, list):
                     pred_norm = torch.stack(pred_norm, dim=2).unsqueeze(-1)  # [B,H,T,1]
                 elif pred_norm.dim() == 3:
                     pred_norm = pred_norm.unsqueeze(2)  # [B,H,1,Q]
 
-                pred_sel = pred_norm[
-                    :, self.horizon - 1, self.target_idx, mid_idx
-                ]  # [B]
-                true_sel = y_norm[:, self.horizon - 1, self.target_idx]  # [B]
+                pred_sel = pred_norm[:, self.horizon - 1, self.target_idx, mid_idx]
+                true_sel = y_norm[:, self.horizon - 1, self.target_idx]
 
                 groups = x["groups"]
                 normalizer = self.dataset.target_normalizer
                 pred_dec = self._inverse_with_groups(pred_sel, normalizer, groups)
                 true_dec = self._inverse_with_groups(true_sel, normalizer, groups)
 
-                # ---- SAFE decoder time index lookup (no boolean ops on tensors) ----
                 dti = x.get("decoder_time_idx", None)
                 if dti is None:
                     dti = x.get("time", None)
                 if dti is None:
-                    dti = x.get("encoder_time_idx", None)
-                if dti is None:
-                    # cannot compute daily IC without a day key
                     continue
-
-                if dti.dim() == 1:
-                    day = dti.detach().cpu().numpy()  # [B]
-                else:
-                    day = dti[:, self.horizon - 1].detach().cpu().numpy()  # [B]
+                day = dti[:, self.horizon - 1].detach().cpu().numpy()
 
                 preds_all.append(pred_dec.detach().cpu().numpy())
                 trues_all.append(true_dec.detach().cpu().numpy())
@@ -226,6 +206,13 @@ class RankICCallback(pl.callbacks.Callback):
         days = np.concatenate(days_all, axis=0)
 
         df = pd.DataFrame({"day": days, "p": preds, "y": trues})
+
+        # keep only last N days if requested
+        if self.last_n_days:
+            max_day = int(np.nanmax(df["day"].values))
+            min_keep = max_day - self.last_n_days + 1
+            df = df[df["day"] >= min_keep]
+
         ics = []
         for _, sub in df.groupby("day"):
             p = sub["p"].to_numpy()
@@ -611,6 +598,7 @@ def main(cfg: DictConfig) -> None:
         predict=True,
         stop_randomization=True,
     )
+
     print("Validation TimeSeriesDataSet created successfully.")
 
     if len(training_dataset) == 0 or len(validation_dataset) == 0:
@@ -621,8 +609,15 @@ def main(cfg: DictConfig) -> None:
         f"Training samples: {len(training_dataset)}, Validation samples: {len(validation_dataset)}"
     )
 
-    # rank-IC callback uses the training dataset's normalizer/encoders
-    rank_ic_cb = RankICCallback(dataset=training_dataset, target_idx=0, horizon=1)
+    # ---- Stable IC evaluation over last N calendar days of the val slice ----
+    last_n_days = int(OmegaConf.select(cfg, "evaluate.ic_last_n_days", default=60))
+    cutoff_date = val_df["date"].max() - pd.Timedelta(days=last_n_days)
+    val_ic_df = val_df[val_df["date"] >= cutoff_date].copy()
+
+    # Create the IC callback using the dedicated loader
+    rank_ic_cb = RankICCallback(
+        dataset=training_dataset, target_idx=0, horizon=1, last_n_days=last_n_days
+    )
 
     calculated_embedding_sizes = get_embedding_sizes_for_tft(training_dataset)
 
@@ -868,7 +863,12 @@ def main(cfg: DictConfig) -> None:
         save_last=True,
         verbose=True,
     )
-    callbacks = [early_stop_callback, lr_monitor, checkpoint_callback, rank_ic_cb]
+    callbacks = [
+        early_stop_callback,
+        LearningRateMonitor(logging_interval=cfg.trainer.lr_monitor_logging_interval),
+        checkpoint_callback,
+        rank_ic_cb,
+    ]
 
     logger = None
     if cfg.trainer.get("use_wandb", False):

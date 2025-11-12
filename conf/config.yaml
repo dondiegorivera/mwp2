@@ -58,6 +58,7 @@ trainer:
 evaluate:
   batch_size: 4096
   num_workers: 8
+  ic_last_n_days: 60
   sample_tickers: ["ALL"]
 
 model:
