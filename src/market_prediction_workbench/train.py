@@ -1,8 +1,8 @@
 # src/market_prediction_workbench/train.py
 import hydra
 from omegaconf import DictConfig, OmegaConf, ListConfig
-import pytorch_lightning as pl
-import polars as pl_df  # Renamed to avoid conflict with pytorch_lightning.pl
+import lightning.pytorch as pl
+import polars as pl_df  # Renamed to avoid conflict with lightning.pytorch alias
 import pandas as pd
 from pathlib import Path
 import numpy as np
@@ -13,6 +13,10 @@ import shutil
 from hydra.core.hydra_config import HydraConfig
 
 from market_prediction_workbench.model import GlobalTFT
+from market_prediction_workbench.sampling import (
+    sequence_balance_weights,
+    tail_upweighting,
+)
 
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import (
@@ -26,7 +30,7 @@ from pytorch_forecasting.data.encoders import (
     MultiNormalizer as _PFMultiNorm,
 )
 
-from pytorch_lightning.callbacks import (
+from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
@@ -716,10 +720,7 @@ def main(cfg: DictConfig) -> None:
                     raise RuntimeError(
                         f"No encoded group/time columns and no 'sequence_id' in dataset.index. Columns: {cols[:15]}..."
                     )
-                seq_counts = idx_df["sequence_id"].value_counts()
-                row_weights = (
-                    idx_df["sequence_id"].map(1.0 / seq_counts).astype("float64").values
-                )
+                row_weights = sequence_balance_weights(idx_df["sequence_id"])
                 sampler = WeightedRandomSampler(
                     weights=torch.as_tensor(row_weights, dtype=torch.double),
                     num_samples=len(row_weights),
@@ -784,15 +785,7 @@ def main(cfg: DictConfig) -> None:
                     key_df, on=["ticker_id_decoded", time_col], how="left"
                 )
                 y_abs = np.abs(idx_df_merged["y_main"].to_numpy())
-                finite = np.isfinite(y_abs)
-                if finite.any():
-                    q70, q90 = np.nanpercentile(y_abs[finite], [70, 90])
-                    tail = np.ones_like(y_abs, dtype=np.float64)
-                    tail[(y_abs >= q70) & (y_abs < q90)] = 1.5
-                    tail[(y_abs >= q90)] = 2.0
-                    tail[~finite] = 1.0
-                else:
-                    tail = np.ones_like(y_abs, dtype=np.float64)
+                tail = tail_upweighting(y_abs)
 
                 weights = base_w * tail
                 weights = np.clip(weights, 1e-6, None)
@@ -872,7 +865,7 @@ def main(cfg: DictConfig) -> None:
 
     logger = None
     if cfg.trainer.get("use_wandb", False):
-        from pytorch_lightning.loggers import WandbLogger
+        from lightning.pytorch.loggers import WandbLogger
 
         run_name_wandb = f"{cfg.project_name}_{cfg.experiment_id}"
         logger = WandbLogger(

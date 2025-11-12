@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from market_prediction_workbench.calibration import coverage_fraction
+
 
 def infer_targets(preds_df: pd.DataFrame) -> list[str]:
     """
@@ -132,14 +134,12 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
     lo = df.get(f"{name}_lower@h1")
     hi = df.get(f"{name}_upper@h1")
     if lo is not None and hi is not None:
-        lo, hi = lo.values[mask], hi.values[mask]
-        cov = float(np.mean((y[mask] >= lo) & (y[mask] <= hi)))  # y in [lo,hi]
+        cov = coverage_fraction(y[mask], lo.values[mask], hi.values[mask])
 
     lo_c = df.get(f"{name}_lower_cal@h1")
     hi_c = df.get(f"{name}_upper_cal@h1")
     if lo_c is not None and hi_c is not None:
-        lo_c, hi_c = lo_c.values[mask], hi_c.values[mask]
-        cov_cal = float(np.mean((y[mask] >= lo_c) & (y[mask] <= hi_c)))  # y in [lo,hi]
+        cov_cal = coverage_fraction(y[mask], lo_c.values[mask], hi_c.values[mask])
 
     return {
         "n": int(mask.sum()),

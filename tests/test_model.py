@@ -2,6 +2,7 @@
 import pytest
 import torch
 import pandas as pd
+import polars as pl
 import numpy as np
 from collections import Counter
 
@@ -57,10 +58,15 @@ def tiny_timeseries_dataset(processed_data, data_config_for_tests):
     # Take a small slice for faster testing
     # Ensure multiple tickers and sufficient history for lookback + prediction
     # Let's try to get at least 2 tickers with enough data
-    ticker_counts = processed_data["ticker_id"].value_counts()
-    valid_tickers = ticker_counts[
-        ticker_counts > (data_config_for_tests.lookback_days + 5)
-    ].index  # 5 for prediction horizon
+    ticker_counts = processed_data.group_by("ticker_id").len()
+    valid_tickers = (
+        ticker_counts.filter(
+            pl.col("len") > (data_config_for_tests.lookback_days + 5)
+        )
+        .select("ticker_id")
+        .to_series()
+        .to_list()
+    )
 
     if len(valid_tickers) < 1:
         pytest.skip(
@@ -170,10 +176,19 @@ def test_tft_forward(tiny_timeseries_dataset):
     if tiny_timeseries_dataset.static_categoricals:
         for cat_col in tiny_timeseries_dataset.static_categoricals:
             # Assuming NaNLabelEncoder or similar is used, which has 'cardinality'
-            vocab_size = tiny_timeseries_dataset.categorical_encoders[
-                cat_col
-            ].cardinality
-            dim = min(round(vocab_size**0.25), 32)
+            encoder = tiny_timeseries_dataset.categorical_encoders.get(cat_col)
+            vocab_size = None
+            if encoder is not None:
+                vocab_size = getattr(encoder, "cardinality", None)
+                if vocab_size is None and hasattr(encoder, "classes_"):
+                    classes = encoder.classes_
+                    if isinstance(classes, dict):
+                        vocab_size = len(classes)
+                    else:
+                        vocab_size = len(classes)
+            if vocab_size is None:
+                vocab_size = 1
+            dim = min(round(vocab_size**0.25), 32) if vocab_size > 1 else 1
             embedding_sizes_calc[cat_col] = int(dim) if dim > 0 else 1
 
     # Minimal model_specific_params, embedding_sizes will be added
@@ -235,75 +250,32 @@ def test_tft_forward(tiny_timeseries_dataset):
     assert torch.isfinite(out.prediction).all()
 
 
-def test_balanced_sampler(processed_data):
-    if processed_data.empty:
-        pytest.skip("Processed data is empty, skipping balanced sampler test.")
-
-    # Use a subset of processed_data to speed up test if it's very large
-    # but ensure enough variety. The prompt implies using the full processed_data.
-    data_pd_for_sampler = (
-        processed_data.to_pandas()
-    )  # Convert polars to pandas for value_counts/reindex
-
-    # Ensure 'ticker_id' is present
-    if "ticker_id" not in data_pd_for_sampler.columns:
-        pytest.skip("Column 'ticker_id' not found in processed_data.")
-
-    counts = data_pd_for_sampler["ticker_id"].value_counts()
-
-    # If only one ticker, ratio test is meaningless
-    if len(counts) < 2:
-        pytest.skip("Balanced sampler test requires at least 2 unique tickers.")
-
-    # Weights for WeightedRandomSampler: 1 / count of ticker for each sample
-    # The `weights` Series should have the same index as `data_pd_for_sampler`
-    # and values should be 1/count_of_ticker_for_that_row
+def test_balanced_sampler():
+    data_pd = pd.DataFrame(
+        {
+            "ticker_id": ["A"] * 2 + ["B"] * 6 + ["C"] * 12 + ["D"] * 20,
+        }
+    )
+    counts = data_pd["ticker_id"].value_counts()
     ticker_to_weight = 1.0 / counts
-    row_weights = (
-        data_pd_for_sampler["ticker_id"].map(ticker_to_weight).fillna(1.0).values
-    )  # .values to get numpy array
-
-    num_samples_to_draw = min(
-        1000, len(data_pd_for_sampler)
-    )  # Draw 1000 samples or dataset size
+    row_weights = data_pd["ticker_id"].map(ticker_to_weight).values
+    num_samples_to_draw = 2000
 
     sampler = WeightedRandomSampler(
-        weights=row_weights, num_samples=num_samples_to_draw, replacement=True
+        weights=torch.as_tensor(row_weights, dtype=torch.double),
+        num_samples=num_samples_to_draw,
+        replacement=True,
     )
 
-    # Get the ticker_ids of the sampled indices
-    sampled_indices = list(sampler)
-    sampled_ids = data_pd_for_sampler["ticker_id"].iloc[sampled_indices]
-
+    sampled_ids = data_pd["ticker_id"].iloc[list(sampler)]
     ratio = sampled_ids.value_counts(normalize=True)
 
-    # Assert that high-volume tickers do not excessively dominate
-    # The condition ratio.max() / ratio.min() < 5
-    # This test can be sensitive if some tickers have very few samples in `processed_data`
-    # or if num_samples_to_draw is small relative to number of tickers.
-    # For robustness, consider filtering tickers with very low counts before this test,
-    # or adjusting the num_samples_to_draw and the threshold.
-
-    min_ticker_count_for_ratio_test = (
-        5  # Tickers must appear at least this many times in the sample
+    expected = pd.Series(
+        1.0 / len(counts),
+        index=counts.index,
+        dtype=float,
     )
-    valid_ratios = ratio[ratio * num_samples_to_draw >= min_ticker_count_for_ratio_test]
+    observed = ratio.reindex(expected.index).fillna(0.0)
 
-    if len(valid_ratios) < 2:
-        print(
-            f"Warning: Balanced sampler test could not be robustly performed. Sampled ratios: {ratio}. Valid ratios for test: {valid_ratios}"
-        )
-        # Potentially skip or assert True if not enough variety in sample
-        # For now, proceed with original assert but be mindful it might fail on sparse data.
-        if ratio.empty:  # if no samples drawn or no valid ratios
-            assert True  # or skip
-            return
-
-    # print(f"Sampler test:counts:\n{counts}")
-    # print(f"Sampler test: ratios:\n{ratio}")
-    # print(f"Sampler test: ratio.max() = {ratio.max()}, ratio.min() = {ratio.min()}")
-    # print(f"Sampler test: ratio.max() / ratio.min() = {ratio.max() / ratio.min()}")
-
-    assert (
-        ratio.max() / ratio.min()
-    ) < 5, f"Sampling imbalance detected: max/min ratio is {ratio.max() / ratio.min()}"
+    diff = (observed - expected).abs().max()
+    assert diff < 0.05, f"Sampler distribution deviates by {diff:.3f}"

@@ -1,0 +1,548 @@
+(market-prediction-workbench-py3.10) rpolczer@RolandGPT:~/sourcetree/projects/mwp2$ make test
+poetry run pytest -q
+...EF.....                                                                                                                                                                                                                             [100%]
+=================================================================================================================== ERRORS ===================================================================================================================
+_____________________________________________________________________________________________________ ERROR at setup of test_tft_forward _____________________________________________________________________________________________________
+
+df = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ u32       ┆ u32   │
+╞═══════════╪═...┆ 3896  │
+│ 507       ┆ 2688  │
+│ 508       ┆ 997   │
+│ 509       ┆ 3082  │
+│ 510       ┆ 3891  │
+└───────────┴───────┘
+key = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ bool      ┆ bool  │
+╞═══════════╪═...┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+└───────────┴───────┘
+
+    def get_df_item_by_key(
+        df: DataFrame,
+        key: (
+            SingleIndexSelector
+            | SingleColSelector
+            | MultiColSelector
+            | MultiIndexSelector
+            | tuple[SingleIndexSelector, SingleColSelector]
+            | tuple[SingleIndexSelector, MultiColSelector]
+            | tuple[MultiIndexSelector, SingleColSelector]
+            | tuple[MultiIndexSelector, MultiColSelector]
+        ),
+    ) -> DataFrame | Series | Any:
+        """Get part of the DataFrame as a new DataFrame, Series, or scalar."""
+        # Two inputs, e.g. df[1, 2:5]
+        if isinstance(key, tuple) and len(key) == 2:
+            row_key, col_key = key
+
+            # Support df[True, False] and df["a", "b"] as these are not ambiguous
+            if isinstance(row_key, (bool, str)):
+                return _select_columns(df, key)  # type: ignore[arg-type]
+
+            selection = _select_columns(df, col_key)
+
+            if selection.is_empty():
+                return selection
+            elif isinstance(selection, pl.Series):
+                return get_series_item_by_key(selection, row_key)
+            else:
+                return _select_rows(selection, row_key)
+
+        # Single string input, e.g. df["a"]
+        if isinstance(key, str):
+            # This case is required because empty strings are otherwise treated
+            # as an empty Sequence in `_select_rows`
+            return df.get_column(key)
+
+        # Single input - df[1] - or multiple inputs - df["a", "b", "c"]
+        try:
+>           return _select_rows(df, key)  # type: ignore[arg-type]
+
+.venv/lib/python3.10/site-packages/polars/_utils/getitem.py:167:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+df = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ u32       ┆ u32   │
+╞═══════════╪═...┆ 3896  │
+│ 507       ┆ 2688  │
+│ 508       ┆ 997   │
+│ 509       ┆ 3082  │
+│ 510       ┆ 3891  │
+└───────────┴───────┘
+key = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ bool      ┆ bool  │
+╞═══════════╪═...┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+└───────────┴───────┘
+
+    def _select_rows(
+        df: DataFrame, key: SingleIndexSelector | MultiIndexSelector
+    ) -> DataFrame | Series:
+        """Select one or more rows from the DataFrame."""
+        if isinstance(key, int):
+            num_rows = df.height
+            if (key >= num_rows) or (key < -num_rows):
+                msg = f"index {key} is out of bounds for DataFrame of height {num_rows}"
+                raise IndexError(msg)
+            return df.slice(key, 1)
+
+        if isinstance(key, slice):
+            return _select_rows_by_slice(df, key)
+
+        elif isinstance(key, range):
+            key = range_to_slice(key)
+            return _select_rows_by_slice(df, key)
+
+        elif isinstance(key, Sequence):
+            if not key:
+                return df.clear()
+            if isinstance(key[0], bool):
+                _raise_on_boolean_mask()
+            s = pl.Series("", key, dtype=Int64)
+            indices = _convert_series_to_indices(s, df.height)
+            return _select_rows_by_index(df, indices)
+
+        elif isinstance(key, pl.Series):
+            indices = _convert_series_to_indices(key, df.height)
+            return _select_rows_by_index(df, indices)
+
+        elif _check_for_numpy(key) and isinstance(key, np.ndarray):
+            indices = _convert_np_ndarray_to_indices(key, df.height)
+            return _select_rows_by_index(df, indices)
+
+        else:
+            msg = f"cannot select rows using key of type {qualified_type_name(key)!r}: {key!r}"
+>           raise TypeError(msg)
+E           TypeError: cannot select rows using key of type 'DataFrame': shape: (509, 2)
+E           ┌───────────┬───────┐
+E           │ ticker_id ┆ count │
+E           │ ---       ┆ ---   │
+E           │ bool      ┆ bool  │
+E           ╞═══════════╪═══════╡
+E           │ false     ┆ true  │
+E           │ false     ┆ true  │
+E           │ false     ┆ true  │
+E           │ false     ┆ true  │
+E           │ false     ┆ true  │
+E           │ …         ┆ …     │
+E           │ true      ┆ true  │
+E           │ true      ┆ true  │
+E           │ true      ┆ true  │
+E           │ true      ┆ true  │
+E           │ true      ┆ true  │
+E           └───────────┴───────┘
+
+.venv/lib/python3.10/site-packages/polars/_utils/getitem.py:328: TypeError
+
+During handling of the above exception, another exception occurred:
+
+processed_data = shape: (1_796_960, 41)
+┌────────────┬───────────┬──────────┬──────────┬───┬────────┬───────────────┬────────────────┬─... ┆ 3890     │
+└────────────┴───────────┴──────────┴──────────┴───┴────────┴───────────────┴────────────────┴──────────┘
+data_config_for_tests = DataConfig(static_reals=[], static_categoricals=['ticker_id', 'sector_id'], time_varying_known_reals=['day_of_week', '...'macd', 'close_norm'], target_columns=['target_1d', 'target_5d', 'target_20d'], lookback_days=20, prediction_horizon=1)
+
+    @pytest.fixture(scope="module")
+    def tiny_timeseries_dataset(processed_data, data_config_for_tests):
+        if processed_data.height == 0:
+            pytest.skip("Processed data is empty, skipping TFT dataset creation.")
+
+        # Take a small slice for faster testing
+        # Ensure multiple tickers and sufficient history for lookback + prediction
+        # Let's try to get at least 2 tickers with enough data
+        ticker_counts = processed_data["ticker_id"].value_counts()
+>       valid_tickers = ticker_counts[
+            ticker_counts > (data_config_for_tests.lookback_days + 5)
+        ].index  # 5 for prediction horizon
+
+tests/test_model.py:62:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv/lib/python3.10/site-packages/polars/dataframe/frame.py:1395: in __getitem__
+    return get_df_item_by_key(self, key)
+.venv/lib/python3.10/site-packages/polars/_utils/getitem.py:169: in get_df_item_by_key
+    return _select_columns(df, key)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+df = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ u32       ┆ u32   │
+╞═══════════╪═...┆ 3896  │
+│ 507       ┆ 2688  │
+│ 508       ┆ 997   │
+│ 509       ┆ 3082  │
+│ 510       ┆ 3891  │
+└───────────┴───────┘
+key = shape: (509, 2)
+┌───────────┬───────┐
+│ ticker_id ┆ count │
+│ ---       ┆ ---   │
+│ bool      ┆ bool  │
+╞═══════════╪═...┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+│ true      ┆ true  │
+└───────────┴───────┘
+
+    def _select_columns(
+        df: DataFrame, key: SingleColSelector | MultiColSelector
+    ) -> DataFrame | Series:
+        """Select one or more columns from the DataFrame."""
+        if isinstance(key, int):
+            return df.to_series(key)
+
+        elif isinstance(key, str):
+            return df.get_column(key)
+
+        elif isinstance(key, slice):
+            start, stop, step = key.start, key.stop, key.step
+            # Fast path for common case: df[x, :]
+            if start is None and stop is None and step is None:
+                return df
+            if isinstance(start, str):
+                start = df.get_column_index(start)
+            if isinstance(stop, str):
+                stop = df.get_column_index(stop) + 1
+            int_slice = slice(start, stop, step)
+            rng = range(df.width)[int_slice]
+            return _select_columns_by_index(df, rng)
+
+        elif isinstance(key, range):
+            return _select_columns_by_index(df, key)
+
+        elif isinstance(key, Sequence):
+            if not key:
+                return df.__class__()
+            first = key[0]
+            if isinstance(first, bool):
+                return _select_columns_by_mask(df, key)  # type: ignore[arg-type]
+            elif isinstance(first, int):
+                return _select_columns_by_index(df, key)  # type: ignore[arg-type]
+            elif isinstance(first, str):
+                return _select_columns_by_name(df, key)  # type: ignore[arg-type]
+            else:
+                msg = f"cannot select columns using Sequence with elements of type {qualified_type_name(first)!r}"
+                raise TypeError(msg)
+
+        elif isinstance(key, pl.Series):
+            if key.is_empty():
+                return df.__class__()
+            dtype = key.dtype
+            if dtype == String:
+                return _select_columns_by_name(df, key)
+            elif dtype.is_integer():
+                return _select_columns_by_index(df, key)
+            elif dtype == Boolean:
+                return _select_columns_by_mask(df, key)
+            else:
+                msg = f"cannot select columns using Series of type {dtype}"
+                raise TypeError(msg)
+
+        elif _check_for_numpy(key) and isinstance(key, np.ndarray):
+            if key.ndim == 0:
+                key = np.atleast_1d(key)
+            elif key.ndim != 1:
+                msg = "multi-dimensional NumPy arrays not supported as index"
+                raise TypeError(msg)
+
+            if len(key) == 0:
+                return df.__class__()
+
+            dtype_kind = key.dtype.kind
+            if dtype_kind in ("i", "u"):
+                return _select_columns_by_index(df, key)
+            elif dtype_kind == "b":
+                return _select_columns_by_mask(df, key)
+            elif isinstance(key[0], str):
+                return _select_columns_by_name(df, key)
+            else:
+                msg = f"cannot select columns using NumPy array of type {key.dtype}"
+                raise TypeError(msg)
+
+        msg = (
+            f"cannot select columns using key of type {qualified_type_name(key)!r}: {key!r}"
+        )
+>       raise TypeError(msg)
+E       TypeError: cannot select columns using key of type 'DataFrame': shape: (509, 2)
+E       ┌───────────┬───────┐
+E       │ ticker_id ┆ count │
+E       │ ---       ┆ ---   │
+E       │ bool      ┆ bool  │
+E       ╞═══════════╪═══════╡
+E       │ false     ┆ true  │
+E       │ false     ┆ true  │
+E       │ false     ┆ true  │
+E       │ false     ┆ true  │
+E       │ false     ┆ true  │
+E       │ …         ┆ …     │
+E       │ true      ┆ true  │
+E       │ true      ┆ true  │
+E       │ true      ┆ true  │
+E       │ true      ┆ true  │
+E       │ true      ┆ true  │
+E       └───────────┴───────┘
+
+.venv/lib/python3.10/site-packages/polars/_utils/getitem.py:260: TypeError
+----------------------------------------------------------------------------------------------------------- Captured stdout setup ------------------------------------------------------------------------------------------------------------
+Loading data from data/raw/stock_data.csv...
+Initial cleaning and type casting complete.
+DataFrame shape: (1807143, 7)
+Sample data:
+shape: (5, 7)
+┌────────────┬────────┬───────┬───────┬────────┬─────────────────────┬────────────┐
+│ date       ┆ ticker ┆ close ┆ open  ┆ volume ┆ industry            ┆ market_cap │
+│ ---        ┆ ---    ┆ ---   ┆ ---   ┆ ---    ┆ ---                 ┆ ---        │
+│ date       ┆ str    ┆ f64   ┆ f64   ┆ i64    ┆ str                 ┆ f64        │
+╞════════════╪════════╪═══════╪═══════╪════════╪═════════════════════╪════════════╡
+│ 2011-12-02 ┆ DLY.F  ┆ 11.25 ┆ 10.93 ┆ 0      ┆ Specialty Chemicals ┆ 2.0000e10  │
+│ 2011-12-05 ┆ DLY.F  ┆ 11.48 ┆ 11.1  ┆ 0      ┆ Specialty Chemicals ┆ 2.0000e10  │
+│ 2011-12-06 ┆ DLY.F  ┆ 11.47 ┆ 11.47 ┆ 0      ┆ Specialty Chemicals ┆ 2.0000e10  │
+│ 2011-12-07 ┆ DLY.F  ┆ 11.38 ┆ 11.38 ┆ 0      ┆ Specialty Chemicals ┆ 2.0000e10  │
+│ 2011-12-08 ┆ DLY.F  ┆ 11.15 ┆ 11.15 ┆ 0      ┆ Specialty Chemicals ┆ 2.0000e10  │
+└────────────┴────────┴───────┴───────┴────────┴─────────────────────┴────────────┘
+Creating ticker and industry mappings...
+Saved mappings to data/processed
+Reindexing to a full calendar and forward-filling gaps...
+Creating features and targets...
+Adjusted close ('adj_close') not found; using 'close' for labels/features.
+Computing trading-day targets (1/5/20)…
+Adding market/sector context features…
+No macro file at data/external/macro.parquet – skipping VIX/yields (proxies still added).
+Feature creation complete. Final shape: (1796960, 41)
+================================================================================================================== FAILURES ==================================================================================================================
+___________________________________________________________________________________________________________ test_balanced_sampler ____________________________________________________________________________________________________________
+
+processed_data = shape: (1_796_960, 41)
+┌────────────┬───────────┬──────────┬──────────┬───┬────────┬───────────────┬────────────────┬─... ┆ 3890     │
+└────────────┴───────────┴──────────┴──────────┴───┴────────┴───────────────┴────────────────┴──────────┘
+
+    def test_balanced_sampler(processed_data):
+>       if processed_data.empty:
+E       AttributeError: 'DataFrame' object has no attribute 'empty'
+
+tests/test_model.py:240: AttributeError
+============================================================================================================== warnings summary ==============================================================================================================
+tests/test_sampling_and_training.py::test_configure_optimizers_one_cycle
+tests/test_sampling_and_training.py::test_configure_optimizers_cosine_warmup
+  /home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/lightning/pytorch/utilities/parsing.py:209: Attribute 'loss' is an instance of `nn.Module` and is already saved during checkpointing. It is recommended to ignore them using `self.save_hyperparameters(ignore=['loss'])`.
+
+tests/test_sampling_and_training.py::test_configure_optimizers_one_cycle
+tests/test_sampling_and_training.py::test_configure_optimizers_cosine_warmup
+  /home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/lightning/pytorch/utilities/parsing.py:209: Attribute 'logging_metrics' is an instance of `nn.Module` and is already saved during checkpointing. It is recommended to ignore them using `self.save_hyperparameters(ignore=['logging_metrics'])`.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================================================================================================== short test summary info ===========================================================================================================
+FAILED tests/test_model.py::test_balanced_sampler - AttributeError: 'DataFrame' object has no attribute 'empty'
+ERROR tests/test_model.py::test_tft_forward - TypeError: cannot select columns using key of type 'DataFrame': shape: (509, 2)
+1 failed, 8 passed, 4 warnings, 1 error in 13.11s
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py", line 475, in _log_traced_frames
+    log.info(msg)
+Message: 'TorchDynamo attempted to trace the following frames: [\n\n]'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/_dynamo/utils.py", line 765, in dump_compile_times
+    log.info(compile_times(repr="str", aggregate=True))
+Message: 'TorchDynamo compilation metrics:\nFunction, Runtimes (s)'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('constrain_symbol_range', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('defer_runtime_assert', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('evaluate_expr', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_simplify_floor_div', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_maybe_guard_rel', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_find', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('has_hint', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('size_hint', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('simplify', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_update_divisible', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('replace', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_maybe_evaluate_static', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('get_implications', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('get_axioms', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('_maybe_evaluate_static_worker', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('safe_expand', CacheInfo(hits=0, misses=0, maxsize=256, currsize=0))
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/rpolczer/.pyenv/versions/3.10.14/lib/python3.10/logging/__init__.py", line 1103, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/rpolczer/sourcetree/projects/mwp2/.venv/lib/python3.10/site-packages/torch/fx/experimental/symbolic_shapes.py", line 166, in log_lru_cache_stats
+    log.debug(
+Message: 'lru_cache_stats %s: %s'
+Arguments: ('uninteresting_files', CacheInfo(hits=0, misses=0, maxsize=None, currsize=0))
+make: *** [Makefile:74: test] Error 1

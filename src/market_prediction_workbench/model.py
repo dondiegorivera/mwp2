@@ -1,9 +1,9 @@
 # src/market_prediction_workbench/model.py
 import torch
 import torch.nn as nn
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 from torch.optim import AdamW
-from pytorch_forecasting.models.temporal_fusion_transformer._tft import (
+from pytorch_forecasting.models.temporal_fusion_transformer import (
     TemporalFusionTransformer,
 )
 from pytorch_forecasting.metrics import QuantileLoss, MultiLoss

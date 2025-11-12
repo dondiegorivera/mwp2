@@ -10,7 +10,7 @@ import hydra
 import numpy as np
 import pandas as pd
 import torch
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 from omegaconf import DictConfig, OmegaConf, ListConfig
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
@@ -18,8 +18,8 @@ from pytorch_forecasting.metrics import QuantileLoss
 from torch.utils.data import DataLoader
 from scipy.stats import spearmanr
 
-# ✅ Use pytorch_lightning callbacks
-from pytorch_lightning.callbacks import (
+# ✅ Use Lightning callbacks
+from lightning.pytorch.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
     LearningRateMonitor,
@@ -27,7 +27,7 @@ from pytorch_lightning.callbacks import (
 
 from market_prediction_workbench.model import GlobalTFT
 
-import polars as plr  # keep polars separate from pl (pytorch_lightning)
+import polars as plr  # keep polars separate from pl (Lightning alias)
 
 
 REQUIRED_STATIC_CATS = ["ticker_id", "sector_id"]

@@ -3,25 +3,18 @@ repos:
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
-        stages: [manual]
       - id: end-of-file-fixer
-        stages: [manual]
       - id: check-yaml
-        stages: [manual]
       - id: check-added-large-files
-        stages: [manual]
 
   - repo: https://github.com/psf/black
     rev: 24.4.2
     hooks:
       - id: black
-        enabled: false  # <-- disables black
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.5.0
     hooks:
       - id: ruff
-        enabled: false  # <-- disables ruff
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-        enabled: false  # <-- disables ruff-format

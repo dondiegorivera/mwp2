@@ -1,63 +1,21 @@
 # conf/data/default_data_config.yaml
-
-# TimeSeriesDataSet parameters
-lookback_days: 120
-max_prediction_horizon: 1 # Max forecast horizon for target definition (e.g., for target_20d)
-min_prediction_horizon: 1 # For pytorch-forecasting, prediction length is max_pred_horizon
-# prediction_length: ${.max_prediction_horizon} # For TimeSeriesDataSet, if using single horizon
-# For multi-horizon targets, target setup is more complex.
-# Pytorch-forecasting handles targets like ["target_1d", "target_5d", "target_20d"]
-# by having them as separate columns in the input data.
-
-batch_size: 256
-num_workers: 8 # For DataLoader
-
-# Core structural parameters
-group_ids:
-  - "ticker_id"
-time_idx: "time_idx"
-target:
-#  - "target_1d"
-#  - "target_5d"
-#  - "target_20d"
-  - "target_5d"
-target_quantiles: [0.05, 0.5, 0.95]
-
-# --- Feature Configuration ---
-
-# Static (per-ticker) features
-static_categoricals:
-  - "ticker_id"
-  - "sector_id"
-static_reals: []
-
-# Time-varying features that are known in the future (e.g., calendar features)
-time_varying_known_categoricals: []
+split:
+  use_date_split: true
+  train_pct: 0.8
+  embargo_days: 30
+target: ["target_5d"]
+min_prediction_horizon: 1
+max_prediction_horizon: 1
 time_varying_known_reals:
-  - "day_of_week"
-  - "day_of_month"
-  - "month"
-  - "is_quarter_end"
-  # 'time_idx' REMOVED FROM THIS LIST. It is not a feature.
-  # The model gets time information from the 'add_relative_time_idx=True' setting in TimeSeriesDataSet.
-
-# Time-varying features that are only known in the past (e.g., price-derived features)
-time_varying_unknown_categoricals: []
-time_varying_unknown_reals:
-  - "log_return_1d"
-  - "log_return_5d"
-  - "log_return_20d"
-  - "volume_zscore_20d"
-  - "volatility_20d"
-  - "rsi_14d"
-  - "macd"
-  - "is_missing" # 'is_missing' flag can be a feature
-
-# --- Normalizer Configuration ---
-scalers:
-  # StandardScaler is a reasonable default for many feature types.
-  default_reals_normalizer: "StandardScaler"
-
-  # GroupNormalizer is best for targets like returns, as it normalizes
-  # each stock's returns relative to its own history.
-  target_normalizer: "GroupNormalizer"
+  - day_of_week
+  - day_of_month
+  - month
+  - is_quarter_end
+  - mkt_ret_1d
+  - mkt_vol_20d
+  - sector_ret_1d
+  - sector_vol_20d
+  - region_ret_1d
+  - region_vol_20d
+static_reals:
+  - market_cap_static_norm

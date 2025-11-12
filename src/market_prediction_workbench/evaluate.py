@@ -17,6 +17,11 @@ from pytorch_forecasting.data.encoders import GroupNormalizer, MultiNormalizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from market_prediction_workbench.calibration import (
+    apply_calibration,
+    coverage_fraction,
+    estimate_calibration_alpha,
+)
 from market_prediction_workbench.model import GlobalTFT
 
 # >>> PATCH: added import for rank-IC helper
@@ -342,7 +347,7 @@ def evaluate(preds: Dict, trues: Dict, short_names: List[str]) -> Dict[str, floa
 
             lower = preds.get(f"{name}_lower@h{h}", np.full_like(pred, np.nan))[mask]
             upper = preds.get(f"{name}_upper@h{h}", np.full_like(pred, np.nan))[mask]
-            coverage = np.mean((true >= lower) & (true <= upper))
+            coverage = coverage_fraction(true, lower, upper)
 
             metrics[f"{name}_mae@h{h}"] = float(mae)
             metrics[f"{name}_rmse@h{h}"] = float(rmse)
@@ -498,17 +503,7 @@ def compute_calibration_alphas(
             alphas[name] = float("nan")
             continue
 
-        s_hat = (hi - lo) / (2.0 * 1.645)
-        denom = 1.645 * s_hat
-        resid = y - p50
-
-        mask = np.isfinite(resid) & np.isfinite(denom) & (denom > 0)
-        if not np.any(mask):
-            alphas[name] = float("nan")
-            continue
-
-        k = np.abs(resid[mask]) / denom[mask]
-        alphas[name] = float(np.nanpercentile(k, 90))
+        alphas[name] = estimate_calibration_alpha(y, p50, lo, hi)
     return alphas
 
 
@@ -533,14 +528,7 @@ def add_calibrated_intervals(
             lo = preds[key_lo]
             hi = preds[key_hi]
 
-            s_hat = (hi - lo) / (2.0 * 1.645)
-
-            if np.isnan(alpha) or alpha <= 0:
-                lo_cal = lo
-                hi_cal = hi
-            else:
-                lo_cal = mid - 1.645 * alpha * s_hat
-                hi_cal = mid + 1.645 * alpha * s_hat
+            lo_cal, hi_cal = apply_calibration(mid, lo, hi, alpha)
 
             preds[f"{name}_lower_cal@h{h}"] = lo_cal
             preds[f"{name}_upper_cal@h{h}"] = hi_cal

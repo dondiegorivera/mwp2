@@ -15,30 +15,6 @@ paths:
   processed_data_file: data/processed/processed_data.eqonly.win.parquet
   log_dir: "experiments"
 
-# NEW: central knobs for splitting & sampler
-data:
-  split:
-    use_date_split: true
-    train_pct: 0.8
-    embargo_days: 30
-  target: ["target_5d"]
-  min_prediction_horizon: 1
-  max_prediction_horizon: 1
-  time_varying_known_reals:
-    - day_of_week
-    - day_of_month
-    - month
-    - is_quarter_end
-    # NEW context features
-    - mkt_ret_1d
-    - mkt_vol_20d
-    - sector_ret_1d
-    - sector_vol_20d
-    - region_ret_1d
-    - region_vol_20d
-  static_reals:
-    - market_cap_static_norm
-
 trainer:
   # training knobs from Section B
   precision: bf16-mixed

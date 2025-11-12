@@ -4,6 +4,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from market_prediction_workbench.calibration import (
+    coverage_fraction,
+    estimate_calibration_alpha,
+)
+
 # --- Inputs (edit if needed) ---
 EVAL_ROOT = Path("../../experiments/evaluation")
 PROCESSED_PARQUET = Path("../../data/processed/processed_data.parquet")
@@ -96,10 +101,11 @@ def per_target_analysis(df, tgt_name="20d"):
     )  # used for calibration
 
     # Overall metrics (should roughly match metrics.json)
+    coverage = coverage_fraction(d[y].to_numpy(), d[p05].to_numpy(), d[p95].to_numpy())
     overall = {
         "mae": float(d["ae"].mean()),
         "rmse": float(np.sqrt((d["resid"] ** 2).mean())),
-        "coverage_90": float(d["inside"].mean()),
+        "coverage_90": coverage,
         # simple robust scale check
         "median_s_hat": float(d["s_hat"].median(skipna=True)),
     }
@@ -133,8 +139,12 @@ def per_target_analysis(df, tgt_name="20d"):
     # Simple one-parameter quantile calibration suggestion (alpha)
     # alpha = 90th percentile of k_ratio (|r| / (1.645 * s_hat))
     # Use finite values only
-    finite_k = d["k_ratio"].replace([np.inf, -np.inf], np.nan).dropna()
-    alpha = float(np.nanpercentile(finite_k.values, 90)) if len(finite_k) else np.nan
+    alpha = estimate_calibration_alpha(
+        d[y].to_numpy(),
+        d[p50].to_numpy(),
+        d[p05].to_numpy(),
+        d[p95].to_numpy(),
+    )
 
     return d, overall, by_ticker, by_date, alpha
 

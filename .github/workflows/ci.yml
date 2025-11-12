@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "CODEX_SPRINT_001"]
+  pull_request:
+    branches: ["main", "CODEX_SPRINT_001"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v2
+        with:
+          poetry-version: "1.8.4"
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Lint (Ruff)
+        run: poetry run ruff check .
+
+      - name: Format check (Black)
+        run: poetry run black --check .
+
+      - name: Run tests
+        run: poetry run pytest -q
