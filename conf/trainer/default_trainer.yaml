@@ -1,18 +1,20 @@
 # conf/trainer/default_trainer.yaml
-epochs: 10
-batch_size: 4096
+epochs: 20
+batch_size: 256
 num_workers: 8
+accumulate_grad_batches: 4
 
 max_epochs: ${trainer.epochs}
 accelerator: "auto"
 devices: "auto"
+precision: "16-mixed"
 
-early_stopping_monitor: "val_loss"
+early_stopping_monitor: val_rank_ic
 early_stopping_patience: 5
-early_stopping_mode: "min"
+early_stopping_mode: max
 
 lr_monitor_logging_interval: "epoch"
-gradient_clip_val: 1.0
+gradient_clip_val: 0.3
 
 # WandB
 use_wandb: true
@@ -21,3 +23,6 @@ wandb_entity: "rolandpolczer-roland-polczer"
 
 # NEW
 use_weighted_sampler: true
+lr_schedule:
+  type: "cosine_warmup"         # options: "one_cycle", "cosine_warmup", "none"
+  warmup_frac: 0.1         # fraction of total steps

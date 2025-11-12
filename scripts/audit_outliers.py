@@ -83,8 +83,15 @@ def load_data(run_dir: Path, data_parquet: Path, ticker_map_path: Path | None):
     return preds, proc
 
 
-def join_truth(preds: pd.DataFrame, proc: pd.DataFrame) -> pd.DataFrame:
-    # merge by (ticker, time_idx_h1) <-> (ticker_id, time_idx)
+def join_truth(preds: pd.DataFrame, proc: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    If predictions.csv already contains explicit *_true columns (preferred),
+    return preds unchanged. Otherwise, join with parquet on (ticker,time_idx).
+    """
+    have_true = any(c.endswith("_true") for c in preds.columns)
+    if have_true or proc is None:
+        return preds.copy()
+
     mm = preds.merge(
         proc,
         left_on=["ticker", "time_idx_h1"],
@@ -96,7 +103,13 @@ def join_truth(preds: pd.DataFrame, proc: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_metrics(df: pd.DataFrame, name: str) -> dict:
-    y = df[f"target_{name}"].values
+    # Prefer explicit truth from CSV
+    y_col_true = f"{name}@h1_true"
+    if y_col_true in df.columns:
+        y = df[y_col_true].values
+    else:
+        y = df[f"target_{name}"].values  # fallback from parquet join
+
     yhat = df[f"{name}@h1"].values
     mask = np.isfinite(y) & np.isfinite(yhat)
     if mask.sum() == 0:
@@ -108,6 +121,7 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
             "coverage_90": np.nan,
             "coverage_90_cal": np.nan,
         }
+
     resid = yhat[mask] - y[mask]
     mae = float(np.mean(np.abs(resid)))
     rmse = float(np.sqrt(np.mean(resid**2)))
@@ -119,12 +133,13 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
     hi = df.get(f"{name}_upper@h1")
     if lo is not None and hi is not None:
         lo, hi = lo.values[mask], hi.values[mask]
-        cov = float(np.mean((yhat[mask] >= lo) & (yhat[mask] <= hi)))
+        cov = float(np.mean((y[mask] >= lo) & (y[mask] <= hi)))  # y in [lo,hi]
+
     lo_c = df.get(f"{name}_lower_cal@h1")
     hi_c = df.get(f"{name}_upper_cal@h1")
     if lo_c is not None and hi_c is not None:
         lo_c, hi_c = lo_c.values[mask], hi_c.values[mask]
-        cov_cal = float(np.mean((yhat[mask] >= lo_c) & (yhat[mask] <= hi_c)))
+        cov_cal = float(np.mean((y[mask] >= lo_c) & (y[mask] <= hi_c)))  # y in [lo,hi]
 
     return {
         "n": int(mask.sum()),
@@ -137,10 +152,14 @@ def compute_metrics(df: pd.DataFrame, name: str) -> dict:
 
 
 def write_outliers(df: pd.DataFrame, name: str, out_dir: Path, topk: int):
-    # compute residuals
     df = df.copy()
-    df[f"{name}_resid"] = df[f"{name}@h1"] - df[f"target_{name}"]
+    true_col = (
+        f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    )
+
+    df[f"{name}_resid"] = df[f"{name}@h1"] - df[true_col]
     df[f"{name}_abs_resid"] = df[f"{name}_resid"].abs()
+
     cols = (
         ["ticker_symbol", "ticker", "time_idx_h1", "date"]
         if "date" in df.columns
@@ -148,7 +167,7 @@ def write_outliers(df: pd.DataFrame, name: str, out_dir: Path, topk: int):
     )
     cols = [c for c in cols if c in df.columns]
     cols += [
-        f"target_{name}",
+        true_col,
         f"{name}@h1",
         f"{name}_lower@h1",
         f"{name}_upper@h1",
@@ -158,10 +177,10 @@ def write_outliers(df: pd.DataFrame, name: str, out_dir: Path, topk: int):
         f"{name}_abs_resid",
     ]
     cols = [c for c in cols if c in df.columns]
+
     out = df.sort_values(f"{name}_abs_resid", ascending=False).head(topk)[cols]
     out.to_csv(out_dir / f"outliers_{name}.csv", index=False)
 
-    # per-ticker summary
     g = df.groupby("ticker_symbol" if "ticker_symbol" in df.columns else "ticker")[
         f"{name}_resid"
     ]
@@ -176,9 +195,12 @@ def write_outliers(df: pd.DataFrame, name: str, out_dir: Path, topk: int):
 
 
 def plot_hist(df: pd.DataFrame, name: str, out_dir: Path):
-    if not {"target_" + name, f"{name}@h1"}.issubset(df.columns):
+    true_col = (
+        f"{name}@h1_true" if f"{name}@h1_true" in df.columns else f"target_{name}"
+    )
+    if not {true_col, f"{name}@h1"}.issubset(df.columns):
         return
-    resid = (df[f"{name}@h1"] - df[f"target_{name}"]).dropna().values
+    resid = (df[f"{name}@h1"] - df[true_col]).dropna().values
     if resid.size == 0:
         return
     plt.figure(figsize=(6, 4))
@@ -217,9 +239,12 @@ def main():
     for name in names:
         # map target names like '1d' -> 'target_1d' present?
         tgt_col = f"target_{name}"
-        if tgt_col not in df.columns:
-            # try a safer mapping: strip non-digits? keep as is if missing
-            raise RuntimeError(f"True column '{tgt_col}' not found in processed data.")
+        true_col = f"{name}@h1_true"
+        if (true_col not in df.columns) and (tgt_col not in df.columns):
+            print(
+                f"Warning: truth missing for '{name}' (neither '{true_col}' nor '{tgt_col}') – skipping."
+            )
+            continue
         metrics = compute_metrics(df, name)
         summary[name] = metrics
         write_outliers(df, name, out_dir, args.topk)
